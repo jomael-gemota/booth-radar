@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from urllib.parse import urljoin, urldefrag
 
 import requests
 from bs4 import BeautifulSoup
@@ -18,6 +19,7 @@ from bs4 import BeautifulSoup
 log = logging.getLogger(__name__)
 
 MIN_TEXT_LEN = 200  # chars; below this, try the requests fallback
+MAX_LINKS = 150
 
 # Tags whose text we always strip (navigation chrome, boilerplate)
 _NOISE_TAGS = {"script", "style", "noscript", "header", "footer", "nav", "iframe"}
@@ -33,6 +35,22 @@ def _clean(soup: BeautifulSoup) -> str:
     return "\n".join(lines)
 
 
+def _links(soup: BeautifulSoup, base_url: str) -> list[tuple[str, str]]:
+    """Return de-duplicated (label, absolute_url) pairs for http(s) links."""
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for a in soup.find_all("a", href=True):
+        href = urldefrag(urljoin(base_url, a["href"]))[0]
+        if not href.lower().startswith(("http://", "https://")) or href in seen:
+            continue
+        seen.add(href)
+        label = " ".join(a.get_text(" ").split())[:80]
+        out.append((label, href))
+        if len(out) >= MAX_LINKS:
+            break
+    return out
+
+
 def _fetch_requests(url: str) -> str:
     headers = {
         "User-Agent": (
@@ -43,8 +61,7 @@ def _fetch_requests(url: str) -> str:
     }
     resp = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    return _clean(soup)
+    return resp.text
 
 
 def _fetch_playwright(url: str) -> str:
@@ -52,46 +69,72 @@ def _fetch_playwright(url: str) -> str:
     # Import here so the worker can still start if Playwright is not installed;
     # callers should handle ImportError.
     from playwright.sync_api import sync_playwright  # type: ignore
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout  # type: ignore
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle", timeout=45_000)
-        html = page.content()
-        browser.close()
+        try:
+            page = browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=15_000)
+            except PlaywrightTimeout:
+                # Sites with constant polling never go idle; use what has rendered.
+                log.info("[scraper] networkidle timed out for %s, using current DOM", url)
+            return page.content()
+        finally:
+            browser.close()
 
-    soup = BeautifulSoup(html, "html.parser")
-    return _clean(soup)
 
-
-def scrape(url: str) -> str:
+def fetch_html(url: str) -> str:
     """
-    Scrape *url* and return clean visible text.
+    Return the HTML of *url*, rendered by Playwright when possible.
     Raises on unrecoverable errors.
     """
-    # Validate URL shape
     if not re.match(r"https?://", url, re.IGNORECASE):
         raise ValueError(f"Invalid URL: {url!r}")
 
-    text = ""
+    html = ""
+    playwright_error: str | None = None
 
     # 1. Try Playwright
     try:
         log.info("[scraper] trying Playwright for %s", url)
-        text = _fetch_playwright(url)
-        log.info("[scraper] Playwright returned %d chars", len(text))
+        html = _fetch_playwright(url)
+        log.info("[scraper] Playwright returned %d chars of HTML", len(html))
     except ImportError:
+        playwright_error = "Playwright is not installed"
         log.warning("[scraper] Playwright not available, using requests fallback")
     except Exception as exc:
-        log.warning("[scraper] Playwright failed (%s), falling back to requests", exc)
+        playwright_error = str(exc).splitlines()[0]
+        log.warning("[scraper] Playwright failed (%s), falling back to requests", playwright_error)
 
-    # 2. Fallback: requests + BS4
-    if len(text) < MIN_TEXT_LEN:
+    # 2. Fallback: requests
+    if len(_clean(BeautifulSoup(html, "html.parser"))) < MIN_TEXT_LEN:
         log.info("[scraper] falling back to requests for %s", url)
-        text = _fetch_requests(url)
-        log.info("[scraper] requests returned %d chars", len(text))
+        fallback = _fetch_requests(url)
+        fallback_text = _clean(BeautifulSoup(fallback, "html.parser"))
+        log.info("[scraper] requests returned %d chars", len(fallback_text))
+        if len(fallback_text) < MIN_TEXT_LEN and playwright_error:
+            raise RuntimeError(
+                f"The page returned almost no text without a browser "
+                f"({len(fallback_text)} chars) and the headless browser failed: {playwright_error}"
+            )
+        html = fallback
 
+    return html
+
+
+def scrape(url: str) -> str:
+    """Scrape *url* and return clean visible text."""
+    text = _clean(BeautifulSoup(fetch_html(url), "html.parser"))
     if not text.strip():
         raise RuntimeError("Scraping returned empty content")
-
     return text
+
+
+def snapshot(url: str) -> tuple[str, list[tuple[str, str]]]:
+    """Scrape *url* and return (visible_text, links)."""
+    soup = BeautifulSoup(fetch_html(url), "html.parser")
+    links = _links(soup, url)
+    return _clean(soup), links
