@@ -150,6 +150,10 @@ def chat_stream(
         stream=True,
         max_tokens=MAX_TOKENS,
     )
+
+    thinking_chunks = 0
+    content_chunks  = 0
+
     with stream:
         for chunk in stream:
             if not chunk.choices:
@@ -159,6 +163,9 @@ def chat_stream(
             # ── Format 1: native reasoning_content field ──────────────────
             reasoning = getattr(delta, "reasoning_content", None) or ""
             if reasoning:
+                thinking_chunks += 1
+                if thinking_chunks == 1:
+                    log.debug("[extractor] thinking via reasoning_content detected")
                 if on_thinking:
                     on_thinking(reasoning)
                 continue  # not part of the reply text
@@ -168,6 +175,7 @@ def chat_stream(
             if not content:
                 continue
 
+            content_chunks += 1
             if think_filt:
                 think_filt.feed(content)
             else:
@@ -175,6 +183,16 @@ def chat_stream(
 
     if think_filt:
         think_filt.flush()
+
+    log.debug(
+        "[extractor] stream done — thinking_chunks=%d content_chunks=%d full_text_len=%d",
+        thinking_chunks, content_chunks, len(full_text),
+    )
+    if thinking_chunks == 0 and on_thinking:
+        log.info(
+            "[extractor] no thinking tokens received from Hermes "
+            "(model may not expose reasoning via this endpoint)"
+        )
 
     return full_text
 
