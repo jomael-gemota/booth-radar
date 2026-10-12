@@ -1,9 +1,8 @@
 """
-extractor.py  –  Call the Hermes / OpenAI-compatible LLM to extract
-                 brand + booth listings from scraped page text.
+extractor.py  –  Call the Hermes / OpenAI-compatible LLM.
 
-Streams reasoning tokens back via a callback so the server can relay
-them to the browser in real time.
+  * chat_stream()  – generic streaming chat completion (used by the agent loop)
+  * extract()      – extract brand + booth listings from scraped page text
 """
 
 from __future__ import annotations
@@ -11,8 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
-from typing import Callable
+from typing import Callable, Optional
 
 from openai import OpenAI
 
@@ -38,30 +36,62 @@ Rules:
   - Normalise brand names (proper title case, remove stray symbols).
   - De-duplicate entries (same brand, same booth = one row).
   - Do not invent brands not present in the source text.
+  - If the page lists no exhibitors, output [].
   - Output the raw JSON array only — no markdown fences, no explanation.
 """
+
+_client: Optional[OpenAI] = None
+
+
+def _get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        _client = OpenAI(
+            base_url=os.getenv("HERMES_BASE_URL") or None,
+            api_key=os.getenv("HERMES_API_KEY") or "not-needed",
+            timeout=REQUEST_TIMEOUT,
+        )
+    return _client
+
+
+def chat_stream(
+    messages: list[dict[str, str]],
+    on_token: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Run a streaming chat completion and return the full response text."""
+    model = os.getenv("HERMES_MODEL") or "hermes-agent"
+    full_text = ""
+
+    stream = _get_client().chat.completions.create(
+        model=model,
+        messages=messages,  # type: ignore[arg-type]
+        stream=True,
+        max_tokens=MAX_TOKENS,
+    )
+    with stream:
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            content = getattr(chunk.choices[0].delta, "content", None) or ""
+            if content:
+                full_text += content
+                if on_token:
+                    on_token(content)
+
+    return full_text
 
 
 def extract(
     page_text: str,
     url: str,
-    on_token: Callable[[str], None],
+    on_token: Optional[Callable[[str], None]] = None,
 ) -> list[dict[str, str]]:
     """
-    Stream an LLM extraction over *page_text*.
-
-    Calls *on_token(chunk)* for each streamed text chunk so the caller
-    can relay it to the browser.  Returns the parsed list of
-    {"brand": …, "booth": …} dicts when done.
+    Run an LLM extraction over *page_text* and return the parsed list of
+    {"brand": …, "booth": …} dicts.
 
     Raises on LLM or JSON parse errors.
     """
-    client = OpenAI(
-        base_url=os.getenv("HERMES_BASE_URL") or None,
-        api_key=os.getenv("HERMES_API_KEY", ""),
-        timeout=REQUEST_TIMEOUT,
-    )
-
     truncated = page_text[:MAX_PAGE_CHARS]
     if len(page_text) > MAX_PAGE_CHARS:
         log.warning(
@@ -75,42 +105,33 @@ def extract(
         f"--- SCRAPED TEXT START ---\n{truncated}\n--- SCRAPED TEXT END ---"
     )
 
-    model = os.getenv("HERMES_MODEL", "hermes-agent")
-    log.info("[extractor] calling %s with model %s", os.getenv("HERMES_BASE_URL", "OpenAI"), model)
-
-    full_text = ""
-
-    with client.chat.completions.create(
-        model=model,
-        messages=[
+    log.info("[extractor] extracting from %s", url)
+    full_text = chat_stream(
+        [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": user_content},
         ],
-        stream=True,
-        max_tokens=MAX_TOKENS,
-    ) as stream:
-        for chunk in stream:
-            delta = chunk.choices[0].delta
-            content = getattr(delta, "content", None) or ""
-            if content:
-                full_text += content
-                on_token(content)
-
+        on_token,
+    )
     log.info("[extractor] received %d chars total", len(full_text))
 
-    # Parse JSON — strip possible markdown fences if the model added them
-    cleaned = re.sub(r"^```(?:json)?\s*", "", full_text.strip(), flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-
-    results: list[dict[str, str]] = json.loads(cleaned)
+    # The model may wrap the array in fences or prose; take the outermost [...]
+    start, end = full_text.find("["), full_text.rfind("]")
+    if start == -1 or end < start:
+        raise ValueError("The model did not return a JSON array")
+    results = json.loads(full_text[start:end + 1])
     if not isinstance(results, list):
         raise ValueError(f"Expected a JSON array, got {type(results).__name__}")
 
-    # Normalise keys
     normalised = []
     for item in results:
+        if not isinstance(item, dict):
+            continue
+        brand = str(item.get("brand", "")).strip()
+        if not brand:
+            continue
         normalised.append({
-            "brand": str(item.get("brand", "")).strip(),
+            "brand": brand,
             "booth": str(item.get("booth", "N/A")).strip() or "N/A",
         })
 
