@@ -4,8 +4,8 @@ test_local.py  –  Test the worker locally without the server or WebSocket.
 Usage:
     python test_local.py https://example.com/exhibitors   # one-shot scrape + extract
     python test_local.py --chat                            # chat with the agent in the terminal
-    python test_local.py --probe-api                       # dump raw Hermes delta fields to
-                                                           # diagnose thinking token format
+    python test_local.py --probe-api                       # probe Hermes API for thinking format
+    python test_local.py --probe-server                    # discover all server endpoints + params
 """
 
 from __future__ import annotations
@@ -136,6 +136,95 @@ def probe_api() -> None:
         print(verdict + "\n")
 
 
+def probe_server() -> None:
+    """
+    Discover every route + parameter the Hermes server exposes, then try
+    various extra_body flags known to enable thinking on different servers.
+    """
+    import urllib.request
+    import urllib.error
+
+    base = (os.getenv("HERMES_BASE_URL") or "http://localhost:8642/v1").rstrip("/v1").rstrip("/")
+    model = os.getenv("HERMES_MODEL") or "hermes-agent"
+    print(f"[probe-server] base={base!r}  model={model!r}\n")
+
+    # ── 1. Discover endpoints ─────────────────────────────────────────────
+    discovery_paths = [
+        "/",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/v1/models",
+        "/v1/chat/completions",   # HEAD only
+        "/api",
+        "/api/docs",
+        "/api/openapi.json",
+    ]
+    print("\033[1m── Endpoint discovery ──\033[0m")
+    for path in discovery_paths:
+        url = base + path
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=4) as r:
+                ct = r.headers.get("Content-Type", "")
+                body_preview = r.read(400).decode("utf-8", errors="replace")
+                print(f"  \033[32m{r.status}\033[0m  {url}  [{ct}]")
+                if "openapi" in path or "json" in ct:
+                    print(f"       {body_preview[:300]}")
+        except urllib.error.HTTPError as e:
+            print(f"  \033[33m{e.code}\033[0m  {url}")
+        except Exception as e:
+            print(f"  \033[31mERR\033[0m  {url}  ({e})")
+
+    # ── 2. Try common thinking-enablement parameters ──────────────────────
+    print("\n\033[1m── Thinking parameter probes ──\033[0m")
+    probe_cases: list[tuple[str, dict]] = [
+        ("include_reasoning=true",         {"include_reasoning": True}),
+        ("stream_thinking=true",           {"stream_thinking": True}),
+        ("show_thinking=true",             {"show_thinking": True}),
+        ("thinking={enabled}",             {"thinking": {"type": "enabled", "budget_tokens": 512}}),
+        ("reasoning_effort=high",          {"reasoning_effort": "high"}),
+        ("reasoning={effort:high}",        {"reasoning": {"effort": "high"}}),
+        ("extended_thinking=true",         {"extended_thinking": True}),
+        ("enable_thinking=true",           {"enable_thinking": True}),
+    ]
+
+    client = _get_client()
+    for label, extra in probe_cases:
+        print(f"\n  trying extra_body={label} …", end=" ", flush=True)
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Say: hello"}],
+                stream=True,
+                max_tokens=60,
+                extra_body=extra,
+            )
+            chunks = []
+            found_reasoning = False
+            with stream:
+                for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    r = getattr(delta, "reasoning_content", None) or ""
+                    c = getattr(delta, "content", None) or ""
+                    if r:
+                        found_reasoning = True
+                        chunks.append(f"\033[33m[R]{r}\033[0m")
+                    if c:
+                        if "<think>" in c or "</think>" in c:
+                            found_reasoning = True
+                        chunks.append(c)
+            result = "".join(chunks)
+            if found_reasoning:
+                print(f"\033[32m✓ THINKING FOUND!\033[0m → {result[:120]}")
+            else:
+                print(f"no thinking  → {result[:80]}")
+        except Exception as e:
+            print(f"\033[31mERROR: {e}\033[0m")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -144,6 +233,8 @@ def main() -> None:
         chat()
     elif sys.argv[1] == "--probe-api":
         probe_api()
+    elif sys.argv[1] == "--probe-server":
+        probe_server()
     else:
         scrape_once(sys.argv[1])
 
