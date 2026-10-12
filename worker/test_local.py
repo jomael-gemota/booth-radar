@@ -6,6 +6,7 @@ Usage:
     python test_local.py --chat                            # chat with the agent in the terminal
     python test_local.py --probe-api                       # probe Hermes API for thinking format
     python test_local.py --probe-server                    # discover all server endpoints + params
+    python test_local.py --probe-raw                       # dump raw SSE wire bytes (bypasses SDK)
 """
 
 from __future__ import annotations
@@ -225,6 +226,82 @@ def probe_server() -> None:
             print(f"\033[31mERROR: {e}\033[0m")
 
 
+def probe_raw() -> None:
+    """
+    Bypass the OpenAI SDK entirely and print every raw SSE line from the server.
+    The SDK silently drops non-standard event types (e.g. 'event: thinking').
+    This shows us the true wire format.
+    """
+    import urllib.request
+
+    base_url = os.getenv("HERMES_BASE_URL") or "http://localhost:8642/v1"
+    api_key  = os.getenv("HERMES_API_KEY") or "not-needed"
+    model    = os.getenv("HERMES_MODEL") or "hermes-agent"
+    url      = base_url.rstrip("/") + "/chat/completions" if not base_url.endswith("/chat/completions") else base_url
+
+    payload = json.dumps({
+        "model":    model,
+        "messages": [{"role": "user", "content": "Think step by step: what is 7 × 8?"}],
+        "stream":   True,
+        "max_tokens": 300,
+    }).encode()
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "Accept":        "text/event-stream",
+        },
+    )
+
+    print(f"[probe-raw] POST {url}\n")
+    print("\033[90m── Raw SSE wire (every line printed) ──\033[0m\n")
+
+    event_types: set[str] = set()
+    field_names: set[str] = set()
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line:
+                    continue
+
+                # Colour-code by field type
+                if line.startswith("event:"):
+                    etype = line[6:].strip()
+                    event_types.add(etype)
+                    print(f"\033[35m{line}\033[0m")   # magenta = event type
+                elif line.startswith("data:"):
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        print(f"\033[90m{line}\033[0m")
+                    else:
+                        try:
+                            parsed = json.loads(data)
+                            field_names.update(parsed.keys())
+                            print(f"\033[36mdata:\033[0m {json.dumps(parsed)}")
+                        except json.JSONDecodeError:
+                            print(f"\033[33mdata (raw):\033[0m {data[:200]}")
+                else:
+                    print(f"\033[90m{line}\033[0m")   # grey = other
+
+    except Exception as e:
+        print(f"\033[31mERROR: {e}\033[0m")
+        return
+
+    print(f"\n\033[1m── Summary ──\033[0m")
+    print(f"  SSE event types seen : {event_types or {'(none — all plain data:)'}}")
+    print(f"  Top-level data fields: {field_names}")
+    if event_types - {"message", ""}:
+        print(f"\033[32m  ✓ Custom event types found! These are hidden by the OpenAI SDK.\033[0m")
+    else:
+        print(f"  No custom event types. Thinking is not exposed at the SSE level.")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -235,6 +312,8 @@ def main() -> None:
         probe_api()
     elif sys.argv[1] == "--probe-server":
         probe_server()
+    elif sys.argv[1] == "--probe-raw":
+        probe_raw()
     else:
         scrape_once(sys.argv[1])
 
