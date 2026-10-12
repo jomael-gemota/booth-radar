@@ -20,6 +20,60 @@ MAX_PAGE_CHARS    = int(os.getenv("MAX_PAGE_CHARS", "40000"))
 REQUEST_TIMEOUT   = int(os.getenv("REQUEST_TIMEOUT", "120"))
 MAX_TOKENS        = int(os.getenv("MAX_TOKENS", "8192"))
 
+
+# ── Thinking filter ────────────────────────────────────────────────────────
+
+class _ThinkingFilter:
+    """
+    Splits a streamed content string into normal text and <think>…</think>
+    reasoning blocks, emitting each chunk to the appropriate callback without
+    buffering more than one partial tag at a time.
+    """
+
+    _OPEN  = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(
+        self,
+        on_content: Callable[[str], None],
+        on_thinking: Callable[[str], None],
+    ) -> None:
+        self._on_content  = on_content
+        self._on_thinking = on_thinking
+        self._buf         = ""
+        self._in_think    = False
+
+    def feed(self, chunk: str) -> None:
+        self._buf += chunk
+        self._process()
+
+    def _process(self) -> None:
+        tag = self._CLOSE if self._in_think else self._OPEN
+        while tag in self._buf:
+            idx    = self._buf.index(tag)
+            before = self._buf[:idx]
+            self._buf = self._buf[idx + len(tag):]
+            if before:
+                (self._on_thinking if self._in_think else self._on_content)(before)
+            self._in_think = not self._in_think
+            tag = self._CLOSE if self._in_think else self._OPEN
+
+        # Hold back a suffix that could be the start of the next tag boundary
+        hold = 0
+        for n in range(min(len(tag) - 1, len(self._buf)), 0, -1):
+            if tag.startswith(self._buf[-n:]):
+                hold = n
+                break
+        safe = self._buf[: len(self._buf) - hold]
+        if safe:
+            (self._on_thinking if self._in_think else self._on_content)(safe)
+            self._buf = self._buf[len(self._buf) - hold:]
+
+    def flush(self) -> None:
+        if self._buf:
+            (self._on_thinking if self._in_think else self._on_content)(self._buf)
+            self._buf = ""
+
 SYSTEM_PROMPT = """\
 You are Booth Radar, an expert web-scraping assistant.
 
@@ -57,10 +111,38 @@ def _get_client() -> OpenAI:
 def chat_stream(
     messages: list[dict[str, str]],
     on_token: Optional[Callable[[str], None]] = None,
+    on_thinking: Optional[Callable[[str], None]] = None,
 ) -> str:
-    """Run a streaming chat completion and return the full response text."""
-    model = os.getenv("HERMES_MODEL") or "hermes-agent"
+    """
+    Run a streaming chat completion and return the full response text.
+
+    Thinking / reasoning tokens are routed to *on_thinking* (if provided)
+    and excluded from the returned text.  Two delivery formats are handled:
+
+    1. Native ``reasoning_content`` field on the delta object (xAI / some
+       OpenAI-compatible providers).
+    2. ``<think>…</think>`` tags embedded in the ``content`` stream
+       (NousResearch Hermes-3 native format).
+    """
+    model     = os.getenv("HERMES_MODEL") or "hermes-agent"
     full_text = ""
+
+    # Build a content accumulator that also feeds on_token.
+    def _handle_content(chunk: str) -> None:
+        nonlocal full_text
+        full_text += chunk
+        if on_token:
+            on_token(chunk)
+
+    # Only allocate the filter when the caller wants thinking tokens.
+    think_filt: Optional[_ThinkingFilter] = (
+        _ThinkingFilter(
+            on_content=_handle_content,
+            on_thinking=on_thinking,  # type: ignore[arg-type]
+        )
+        if on_thinking
+        else None
+    )
 
     stream = _get_client().chat.completions.create(
         model=model,
@@ -72,11 +154,27 @@ def chat_stream(
         for chunk in stream:
             if not chunk.choices:
                 continue
-            content = getattr(chunk.choices[0].delta, "content", None) or ""
-            if content:
-                full_text += content
-                if on_token:
-                    on_token(content)
+            delta = chunk.choices[0].delta
+
+            # ── Format 1: native reasoning_content field ──────────────────
+            reasoning = getattr(delta, "reasoning_content", None) or ""
+            if reasoning:
+                if on_thinking:
+                    on_thinking(reasoning)
+                continue  # not part of the reply text
+
+            # ── Format 2: content stream (may contain <think> tags) ───────
+            content = getattr(delta, "content", None) or ""
+            if not content:
+                continue
+
+            if think_filt:
+                think_filt.feed(content)
+            else:
+                _handle_content(content)
+
+    if think_filt:
+        think_filt.flush()
 
     return full_text
 

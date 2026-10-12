@@ -206,7 +206,11 @@ def run_turn(
 
     for step in range(AGENT_MAX_STEPS):
         filt = _ToolBlockFilter(lambda t: emit("token", {"text": t}))
-        text = chat_stream(convo, filt.feed)
+        text = chat_stream(
+            convo,
+            on_token=filt.feed,
+            on_thinking=lambda t: emit("thinking", {"text": t}),
+        )
         filt.flush()
 
         idx = text.find(TOOL_OPEN)
