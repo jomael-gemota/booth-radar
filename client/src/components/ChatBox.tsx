@@ -5,7 +5,7 @@ import './ChatBox.css'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type Role = 'user' | 'assistant' | 'status' | 'system'
+type Role = 'user' | 'assistant' | 'status' | 'system' | 'thinking'
 
 interface Message {
   id: string
@@ -52,6 +52,7 @@ export default function ChatBox() {
   const [busy, setBusy] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const streamingMsgId = useRef<string | null>(null)
+  const thinkingMsgId = useRef<string | null>(null)
 
   const addMessage = useCallback((msg: Message) => {
     setMessages((prev) => [...prev, msg])
@@ -110,12 +111,33 @@ export default function ChatBox() {
   function finishStreaming() {
     const id = streamingMsgId.current
     streamingMsgId.current = null
-    if (!id) return
-    setMessages((prev) =>
-      prev
-        .filter((m) => m.id !== id || m.text.trim() !== '')
-        .map((m) => (m.id === id ? { ...m, streaming: false } : m)),
-    )
+    if (id) {
+      setMessages((prev) =>
+        prev
+          .filter((m) => m.id !== id || m.text.trim() !== '')
+          .map((m) => (m.id === id ? { ...m, streaming: false } : m)),
+      )
+    }
+
+    // Also stop streaming on the thinking bubble (collapses it)
+    const tid = thinkingMsgId.current
+    thinkingMsgId.current = null
+    if (tid) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === tid ? { ...m, streaming: false } : m)),
+      )
+    }
+  }
+
+  function handleThinking(text: string) {
+    const tid = thinkingMsgId.current
+    if (!tid) {
+      const newId = genId()
+      thinkingMsgId.current = newId
+      addMessage({ id: newId, role: 'thinking', text, streaming: true })
+      return
+    }
+    setMessages((prev) => prev.map((m) => (m.id === tid ? { ...m, text: m.text + text } : m)))
   }
 
   function handleToken(text: string) {
@@ -141,6 +163,7 @@ export default function ChatBox() {
   }
 
   useStream(turnId, {
+    onThinking: handleThinking,
     onToken: handleToken,
     onStatus: handleStatus,
     onResults: setResults,
@@ -190,6 +213,7 @@ export default function ChatBox() {
   function newChat() {
     localStorage.removeItem(STORAGE_KEY)
     streamingMsgId.current = null
+    thinkingMsgId.current = null
     setConversationId(null)
     setTurnId(null)
     setBusy(false)
@@ -227,7 +251,11 @@ export default function ChatBox() {
       <div className="chat-messages">
         {messages.map((msg) => (
           <div key={msg.id} className={`bubble bubble--${msg.role}`}>
-            <MessageContent text={msg.text} streaming={msg.streaming} />
+            {msg.role === 'thinking' ? (
+              <ThinkingBubble text={msg.text} streaming={msg.streaming} />
+            ) : (
+              <MessageContent text={msg.text} streaming={msg.streaming} />
+            )}
           </div>
         ))}
 
@@ -295,6 +323,38 @@ function MessageContent({ text, streaming }: { text: string; streaming?: boolean
         __html: renderMarkdown(text) + (streaming ? '<span class="cursor-blink">▌</span>' : ''),
       }}
     />
+  )
+}
+
+function ThinkingBubble({ text, streaming }: { text: string; streaming?: boolean }) {
+  const [expanded, setExpanded] = useState(!!streaming)
+
+  // Auto-expand while streaming, collapse when done
+  useEffect(() => {
+    if (streaming) setExpanded(true)
+    else setExpanded(false)
+  }, [streaming])
+
+  return (
+    <div className="thinking-bubble">
+      <button
+        type="button"
+        className="thinking-toggle"
+        onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+      >
+        <span className={`thinking-icon${streaming ? ' thinking-icon--spin' : ''}`}>🧠</span>
+        <span className="thinking-label">
+          {streaming ? 'Thinking…' : 'View reasoning'}
+        </span>
+        <span className="thinking-chevron">{expanded ? '▲' : '▼'}</span>
+      </button>
+      {expanded && (
+        <div className="thinking-content">
+          <MessageContent text={text} streaming={streaming} />
+        </div>
+      )}
+    </div>
   )
 }
 

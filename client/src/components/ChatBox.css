@@ -262,3 +262,75 @@
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ── Thinking bubble ──────────────────────────────────────────────────────── */
+.bubble--thinking {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed #3d3060;
+  color: var(--text-muted);
+  padding: 6px 10px;
+  max-width: 90%;
+}
+
+.thinking-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: #9080d0;
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  transition: color 0.15s;
+}
+
+.thinking-toggle:hover {
+  color: #b8aaee;
+}
+
+.thinking-icon {
+  font-size: 0.9rem;
+}
+
+.thinking-icon--spin {
+  display: inline-block;
+  animation: thinking-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes thinking-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.6; transform: scale(0.9); }
+}
+
+.thinking-label {
+  font-style: italic;
+}
+
+.thinking-chevron {
+  font-size: 0.65rem;
+  margin-left: 2px;
+}
+
+.thinking-content {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: #8070a0;
+  border-left: 2px solid #3d3060;
+  padding-left: 10px;
+  margin-top: 2px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #3d3060 transparent;
+}

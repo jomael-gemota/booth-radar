@@ -5,18 +5,20 @@ export interface BoothEntry {
   booth: string
 }
 
-interface TokenPayload   { text: string }
-interface StatusPayload  { text: string }
-interface ResultsPayload { results: BoothEntry[] }
-interface DonePayload    { reply: string; results: BoothEntry[] }
-interface ErrorPayload   { message: string }
+interface ThinkingPayload  { text: string }
+interface TokenPayload     { text: string }
+interface StatusPayload    { text: string }
+interface ResultsPayload   { results: BoothEntry[] }
+interface DonePayload      { reply: string; results: BoothEntry[] }
+interface ErrorPayload     { message: string }
 
 type Handler = {
-  onToken:   (text: string) => void
-  onStatus:  (text: string) => void
-  onResults: (results: BoothEntry[]) => void
-  onDone:    (results: BoothEntry[]) => void
-  onError:   (message: string) => void
+  onThinking?: (text: string) => void
+  onToken:    (text: string) => void
+  onStatus:   (text: string) => void
+  onResults:  (results: BoothEntry[]) => void
+  onDone:     (results: BoothEntry[]) => void
+  onError:    (message: string) => void
 }
 
 /**
@@ -31,6 +33,10 @@ export function useStream(turnId: string | null, handlers: Handler) {
     if (!turnId) return
 
     const es = new EventSource(`/api/stream/${turnId}`)
+
+    es.addEventListener('thinking', (e) => {
+      handlersRef.current.onThinking?.((JSON.parse(e.data) as ThinkingPayload).text)
+    })
 
     es.addEventListener('token', (e) => {
       handlersRef.current.onToken((JSON.parse(e.data) as TokenPayload).text)
