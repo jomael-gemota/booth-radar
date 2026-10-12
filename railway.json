@@ -1,6 +1,7 @@
 {
   "build": {
-    "builder": "nixpacks"
+    "builder": "nixpacks",
+    "buildCommand": "npm install --include=dev && npm run build"
   },
   "deploy": {
     "startCommand": "node server/dist/index.js",
