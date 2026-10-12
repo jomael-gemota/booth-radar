@@ -4,4 +4,4 @@ python-dotenv==1.0.1
 playwright==1.45.1
 beautifulsoup4==4.12.3
 requests==2.32.3
-openai==1.37.0
+openai==1.109.1
