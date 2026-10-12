@@ -1,0 +1,24 @@
+.export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent-dim);
+  color: #fff;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+  margin-top: 8px;
+}
+
+.export-btn:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.export-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
