@@ -24,7 +24,7 @@ export interface ConversationDoc {
   results: BoothEntry[];
 }
 
-type WorkerEventType = 'token' | 'status' | 'results' | 'done' | 'error';
+type WorkerEventType = 'thinking' | 'token' | 'status' | 'results' | 'done' | 'error';
 
 interface WorkerMessage {
   turnId: string;
