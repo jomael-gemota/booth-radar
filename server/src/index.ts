@@ -117,8 +117,8 @@ async function main() {
     });
   });
 
-  server.listen(PORT, () => {
-    console.log(`[server] listening on http://localhost:${PORT}`);
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[server] listening on port ${PORT}`);
   });
 }
 
