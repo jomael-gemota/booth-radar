@@ -65,70 +65,75 @@ def chat() -> None:
 
 def probe_api() -> None:
     """
-    Send a single message to Hermes and print every raw field on every delta chunk.
-    This tells us definitively which format the Hermes instance uses for thinking:
-      • reasoning_content  (xAI / DeepSeek-R1 style)
-      • <think>…</think>  (Hermes-3 native, inside content)
-      • neither            (thinking not exposed)
+    Two-pass probe of the Hermes API:
+      Pass 1 — raw prompt (does the model produce thinking natively?)
+      Pass 2 — with our <think> system instruction (does it follow it?)
     """
     client = _get_client()
     model  = os.getenv("HERMES_MODEL") or "hermes-agent"
-    print(f"[probe] model={model!r}  base_url={os.getenv('HERMES_BASE_URL')!r}")
-    print("[probe] prompt: 'Think step by step: what is 2 + 2?'\n")
+    print(f"[probe] model={model!r}  base_url={os.getenv('HERMES_BASE_URL')!r}\n")
 
-    stream = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": "Think step by step: what is 2 + 2?"}],
-        stream=True,
-        max_tokens=300,
+    system_with_think = (
+        "Before EVERY reply, reason step by step inside <think>…</think> tags. "
+        "After </think>, write your visible answer."
     )
 
-    seen_reasoning = False
-    seen_think_tag = False
-    last_delta_dump: str = ""
+    for label, messages in [
+        ("Pass 1 — no system prompt (native thinking?)", [
+            {"role": "user", "content": "Think step by step: what is 12 × 17?"},
+        ]),
+        ("Pass 2 — with <think> instruction in system prompt", [
+            {"role": "system", "content": system_with_think},
+            {"role": "user",   "content": "What is 12 × 17?"},
+        ]),
+    ]:
+        print(f"\033[1m── {label} ──\033[0m")
+        stream = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            stream=True,
+            max_tokens=400,
+        )
 
-    with stream:
-        for i, chunk in enumerate(stream):
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
+        seen_reasoning = False
+        seen_think_tag = False
+        last_delta_dump = ""
 
-            # Capture a dump of the last non-empty delta for the summary
-            try:
-                raw = delta.model_dump()
-                if any(v for v in raw.values() if v):
-                    last_delta_dump = json.dumps(raw, default=str)
-            except Exception:
-                pass
+        with stream:
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                try:
+                    raw = delta.model_dump()
+                    if any(v for v in raw.values() if v):
+                        last_delta_dump = json.dumps(raw, default=str)
+                except Exception:
+                    pass
 
-            reasoning = getattr(delta, "reasoning_content", None) or ""
-            content   = getattr(delta, "content",           None) or ""
+                reasoning = getattr(delta, "reasoning_content", None) or ""
+                content   = getattr(delta, "content",           None) or ""
 
-            if reasoning:
-                if not seen_reasoning:
-                    print("\n\033[33m── reasoning_content detected ──\033[0m")
-                    seen_reasoning = True
-                print(f"\033[33m{reasoning}\033[0m", end="", flush=True)
+                if reasoning:
+                    if not seen_reasoning:
+                        print("\033[33m[reasoning_content]\033[0m ", end="")
+                        seen_reasoning = True
+                    print(f"\033[33m{reasoning}\033[0m", end="", flush=True)
 
-            if content:
-                if "<think>" in content or "</think>" in content:
-                    if not seen_think_tag:
-                        print("\n\033[33m── <think> tag detected in content ──\033[0m")
+                if content:
+                    if "<think>" in content or "</think>" in content:
                         seen_think_tag = True
-                print(content, end="", flush=True)
+                    print(content, end="", flush=True)
 
-    print("\n\n\033[90m── last non-empty delta (model_dump) ──\033[0m")
-    print(last_delta_dump or "(empty)")
-    print()
+        print(f"\n\n\033[90mδ dump: {last_delta_dump or '(empty)'}\033[0m")
 
-    if seen_reasoning:
-        print("\033[32m✓ Hermes uses reasoning_content  → our code will capture it.\033[0m")
-    elif seen_think_tag:
-        print("\033[32m✓ Hermes uses <think> tags in content  → our filter will capture it.\033[0m")
-    else:
-        print("\033[31m✗ No thinking tokens detected in this response.\033[0m")
-        print("  Hermes may not expose reasoning via this API, or the model")
-        print("  doesn't produce thinking for this prompt. Try a harder prompt.")
+        if seen_reasoning:
+            verdict = "\033[32m✓ reasoning_content — captured natively\033[0m"
+        elif seen_think_tag:
+            verdict = "\033[32m✓ <think> tags in content — filter captures them\033[0m"
+        else:
+            verdict = "\033[31m✗ no thinking tokens in this pass\033[0m"
+        print(verdict + "\n")
 
 
 def main() -> None:
