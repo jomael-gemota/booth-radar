@@ -1,0 +1,4 @@
+# The client is a static build artifact — it is served by the Express server.
+# This file prevents Railway from treating the client as a standalone deployable service.
+[start]
+cmd = ""
