@@ -1,0 +1,170 @@
+import type { Response } from 'express';
+import { WebSocket } from 'ws';
+import { ObjectId } from 'mongodb';
+import { getDb } from './db.js';
+
+// ── Shared types ───────────────────────────────────────────────────────────
+
+export interface BoothEntry {
+  brand: string;
+  booth: string;
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  at: Date;
+}
+
+export interface ConversationDoc {
+  _id: ObjectId;
+  createdAt: Date;
+  updatedAt: Date;
+  messages: ChatMessage[];
+  results: BoothEntry[];
+}
+
+type WorkerEventType = 'token' | 'status' | 'results' | 'done' | 'error';
+
+interface WorkerMessage {
+  turnId: string;
+  type: WorkerEventType;
+  payload: unknown;
+}
+
+interface Turn {
+  conversationId: ObjectId;
+  events: string[];
+  clients: Set<Response>;
+  finished: boolean;
+}
+
+// How long a finished turn's events stay available for late SSE subscribers
+const TURN_RETENTION_MS = 60_000;
+
+const turns = new Map<string, Turn>();
+// conversationId → turnId of the turn currently running
+const activeTurns = new Map<string, string>();
+
+let workerSocket: WebSocket | null = null;
+
+export function conversations() {
+  return getDb().collection<ConversationDoc>('conversations');
+}
+
+export function isWorkerConnected(): boolean {
+  return workerSocket !== null && workerSocket.readyState === WebSocket.OPEN;
+}
+
+export function activeTurnFor(conversationId: string): string | undefined {
+  return activeTurns.get(conversationId);
+}
+
+// ── Turn lifecycle ─────────────────────────────────────────────────────────
+
+export function startTurn(
+  turnId: string,
+  conversationId: ObjectId,
+  messages: Pick<ChatMessage, 'role' | 'content'>[],
+  results: BoothEntry[],
+): void {
+  if (!workerSocket || !isWorkerConnected()) {
+    throw new Error('Worker is not connected');
+  }
+  turns.set(turnId, { conversationId, events: [], clients: new Set(), finished: false });
+  activeTurns.set(conversationId.toHexString(), turnId);
+  workerSocket.send(JSON.stringify({ type: 'chat', turnId, messages, results }));
+}
+
+function broadcast(turnId: string, turn: Turn, type: WorkerEventType, payload: unknown): void {
+  const frame = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
+  turn.events.push(frame);
+  for (const res of turn.clients) res.write(frame);
+
+  if (type === 'done' || type === 'error') {
+    turn.finished = true;
+    activeTurns.delete(turn.conversationId.toHexString());
+    for (const res of turn.clients) res.end();
+    turn.clients.clear();
+    setTimeout(() => turns.delete(turnId), TURN_RETENTION_MS);
+  }
+}
+
+/** Attach an SSE response to a turn, replaying events emitted so far. */
+export function subscribe(turnId: string, res: Response): boolean {
+  const turn = turns.get(turnId);
+  if (!turn) return false;
+
+  for (const frame of turn.events) res.write(frame);
+  if (turn.finished) {
+    res.end();
+    return true;
+  }
+
+  turn.clients.add(res);
+  res.on('close', () => turn.clients.delete(res));
+  return true;
+}
+
+// ── Persistence ────────────────────────────────────────────────────────────
+
+async function persist(turn: Turn, type: WorkerEventType, payload: unknown): Promise<void> {
+  const col = conversations();
+  if (type === 'results') {
+    const { results } = payload as { results: BoothEntry[] };
+    await col.updateOne({ _id: turn.conversationId }, { $set: { results, updatedAt: new Date() } });
+  } else if (type === 'done') {
+    const { reply, results } = payload as { reply: string; results: BoothEntry[] };
+    await col.updateOne(
+      { _id: turn.conversationId },
+      {
+        $set: { results, updatedAt: new Date() },
+        $push: { messages: { role: 'assistant', content: reply, at: new Date() } },
+      },
+    );
+  }
+}
+
+// ── Worker socket ──────────────────────────────────────────────────────────
+
+export function attachWorker(ws: WebSocket): void {
+  console.log('[ws] worker connected');
+  workerSocket = ws;
+
+  ws.on('message', (raw) => {
+    let msg: WorkerMessage;
+    try {
+      msg = JSON.parse(raw.toString()) as WorkerMessage;
+    } catch (err) {
+      console.error('[ws] failed to parse worker message', err);
+      return;
+    }
+
+    const turn = turns.get(msg.turnId);
+    if (!turn || turn.finished) return;
+
+    persist(turn, msg.type, msg.payload).catch((err) =>
+      console.error('[db] failed to persist turn event', err),
+    );
+    broadcast(msg.turnId, turn, msg.type, msg.payload);
+  });
+
+  const detach = () => {
+    if (workerSocket !== ws) return;
+    console.log('[ws] worker disconnected');
+    workerSocket = null;
+    for (const [turnId, turn] of turns) {
+      if (!turn.finished) {
+        broadcast(turnId, turn, 'error', {
+          message: 'The worker disconnected while handling your message. Please try again.',
+        });
+      }
+    }
+  };
+
+  ws.on('close', detach);
+  ws.on('error', (err) => {
+    console.error('[ws] worker error', err);
+    detach();
+  });
+}
