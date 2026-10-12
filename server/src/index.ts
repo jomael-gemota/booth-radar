@@ -3,12 +3,14 @@ import express from 'express';
 import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
+import path from 'path';
 import { ObjectId } from 'mongodb';
 import { connectDb, getDb } from './db.js';
 import { scrapeRouter } from './routes/scrape.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
+const IS_PROD = process.env.NODE_ENV === 'production';
 
 // ── SSE subscriber map ─────────────────────────────────────────────────────
 // jobId → Set of SSE response objects
@@ -21,7 +23,12 @@ async function main() {
   await connectDb();
 
   const app = express();
-  app.use(cors({ origin: CLIENT_ORIGIN }));
+
+  // In dev, allow Vite's dev server origin; in prod, client is served from same origin
+  if (!IS_PROD) {
+    app.use(cors({ origin: CLIENT_ORIGIN }));
+  }
+
   app.use(express.json());
 
   app.use('/api', scrapeRouter);
@@ -29,6 +36,16 @@ async function main() {
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, workerConnected: workerSocket !== null });
   });
+
+  // ── Serve built React app in production ────────────────────────────────
+  if (IS_PROD) {
+    const clientDist = path.join(__dirname, '../../client/dist');
+    app.use(express.static(clientDist));
+    // Catch-all: serve index.html for client-side routing
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(clientDist, 'index.html'));
+    });
+  }
 
   const server = http.createServer(app);
 
