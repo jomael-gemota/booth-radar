@@ -4,6 +4,7 @@ import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 import path from 'path';
+import fs from 'fs';
 import { ObjectId } from 'mongodb';
 import { connectDb, getDb } from './db.js';
 import { scrapeRouter } from './routes/scrape.js';
@@ -24,7 +25,7 @@ async function main() {
 
   const app = express();
 
-  // In dev, allow Vite's dev server origin; in prod, client is served from same origin
+  // In dev (no client/dist), allow Vite's dev server origin for CORS
   if (!IS_PROD) {
     app.use(cors({ origin: CLIENT_ORIGIN }));
   }
@@ -37,14 +38,19 @@ async function main() {
     res.json({ ok: true, workerConnected: workerSocket !== null });
   });
 
-  // ── Serve built React app in production ────────────────────────────────
-  if (IS_PROD) {
-    const clientDist = path.join(__dirname, '../../client/dist');
+  // ── Serve built React app if client/dist exists ────────────────────────
+  // Works automatically in production (Railway builds client/dist before start)
+  // and is silently skipped in local dev (where Vite handles the client).
+  const clientDist = path.join(__dirname, '../../client/dist');
+  if (fs.existsSync(clientDist)) {
+    console.log(`[server] serving static client from ${clientDist}`);
     app.use(express.static(clientDist));
-    // Catch-all: serve index.html for client-side routing
+    // Catch-all: return index.html for client-side routing
     app.get('*', (_req, res) => {
       res.sendFile(path.join(clientDist, 'index.html'));
     });
+  } else {
+    console.log('[server] client/dist not found — skipping static file serving (dev mode)');
   }
 
   const server = http.createServer(app);
