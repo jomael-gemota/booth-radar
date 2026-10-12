@@ -2,22 +2,22 @@ import { useState } from 'react'
 import './ExportButton.css'
 
 interface Props {
-  jobId: string
+  conversationId: string
 }
 
-export default function ExportButton({ jobId }: Props) {
+export default function ExportButton({ conversationId }: Props) {
   const [loading, setLoading] = useState(false)
 
   async function handleExport() {
     setLoading(true)
     try {
-      const res = await fetch(`/api/jobs/${jobId}/export`)
+      const res = await fetch(`/api/conversations/${conversationId}/export`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `booth-radar-${jobId}.csv`
+      a.download = `booth-radar-${conversationId}.csv`
       a.click()
       URL.revokeObjectURL(url)
     } catch (err) {

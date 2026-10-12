@@ -7,7 +7,7 @@ export default function App() {
       <header className="app-header">
         <span className="app-logo">📡</span>
         <h1>Booth Radar</h1>
-        <p className="app-sub">Paste an exhibitor website URL to extract brand &amp; booth listings.</p>
+        <p className="app-sub">Chat with Booth Radar to collect exhibitor brands &amp; booth locations from trade-show sites.</p>
       </header>
       <ChatBox />
     </main>

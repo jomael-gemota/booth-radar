@@ -1,56 +1,63 @@
 import { useEffect, useRef } from 'react'
 
-export type SseEventType = 'token' | 'done' | 'error'
-
-export interface TokenPayload  { text: string }
-export interface DonePayload   { results: BoothEntry[] }
-export interface ErrorPayload  { message: string }
-
 export interface BoothEntry {
   brand: string
   booth: string
 }
 
+interface TokenPayload   { text: string }
+interface StatusPayload  { text: string }
+interface ResultsPayload { results: BoothEntry[] }
+interface DonePayload    { reply: string; results: BoothEntry[] }
+interface ErrorPayload   { message: string }
+
 type Handler = {
-  onToken: (text: string) => void
-  onDone:  (results: BoothEntry[]) => void
-  onError: (message: string) => void
+  onToken:   (text: string) => void
+  onStatus:  (text: string) => void
+  onResults: (results: BoothEntry[]) => void
+  onDone:    (results: BoothEntry[]) => void
+  onError:   (message: string) => void
 }
 
 /**
- * Opens an SSE stream for the given jobId and calls handler callbacks.
- * Returns a cleanup function that closes the stream.
+ * Opens an SSE stream for one assistant turn and calls handler callbacks.
+ * The stream closes on `done`, `error`, or when turnId changes.
  */
-export function useStream(jobId: string | null, handlers: Handler) {
+export function useStream(turnId: string | null, handlers: Handler) {
   const handlersRef = useRef(handlers)
   handlersRef.current = handlers
 
   useEffect(() => {
-    if (!jobId) return
+    if (!turnId) return
 
-    const es = new EventSource(`/api/stream/${jobId}`)
+    const es = new EventSource(`/api/stream/${turnId}`)
 
     es.addEventListener('token', (e) => {
-      const { text } = JSON.parse(e.data) as TokenPayload
-      handlersRef.current.onToken(text)
+      handlersRef.current.onToken((JSON.parse(e.data) as TokenPayload).text)
+    })
+
+    es.addEventListener('status', (e) => {
+      handlersRef.current.onStatus((JSON.parse(e.data) as StatusPayload).text)
+    })
+
+    es.addEventListener('results', (e) => {
+      handlersRef.current.onResults((JSON.parse(e.data) as ResultsPayload).results)
     })
 
     es.addEventListener('done', (e) => {
-      const { results } = JSON.parse(e.data) as DonePayload
-      handlersRef.current.onDone(results)
       es.close()
+      handlersRef.current.onDone((JSON.parse(e.data) as DonePayload).results)
     })
 
     es.addEventListener('error', (e) => {
+      es.close()
       if (e instanceof MessageEvent) {
-        const { message } = JSON.parse(e.data) as ErrorPayload
-        handlersRef.current.onError(message)
+        handlersRef.current.onError((JSON.parse(e.data) as ErrorPayload).message)
       } else {
         handlersRef.current.onError('Connection lost')
       }
-      es.close()
     })
 
     return () => es.close()
-  }, [jobId])
+  }, [turnId])
 }

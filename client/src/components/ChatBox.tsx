@@ -5,7 +5,7 @@ import './ChatBox.css'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type Role = 'user' | 'assistant' | 'system'
+type Role = 'user' | 'assistant' | 'status' | 'system'
 
 interface Message {
   id: string
@@ -14,158 +14,216 @@ interface Message {
   streaming?: boolean
 }
 
+interface ConversationResponse {
+  id: string
+  messages: { role: 'user' | 'assistant'; content: string }[]
+  results: BoothEntry[]
+  activeTurnId: string | null
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+const STORAGE_KEY = 'booth-radar:conversationId'
+
+const WELCOME: Message = {
+  id: 'welcome',
+  role: 'assistant',
+  text:
+    "Hi! I'm Booth Radar. Tell me which trade-show site to look at and what you need, for example:\n" +
+    '• "Get all exhibitors and booths from https://www.atlanta-apparel.com/exhibitor/Directory, every letter A–Z"\n' +
+    '• "Just scrape letters A to C for now"\n' +
+    'I\'ll collect the brands and booths into a table you can export as CSV.',
+}
 
 function genId() {
   return Math.random().toString(36).slice(2)
 }
 
-const URL_RE = /^https?:\/\/.+/i
-
-function isUrl(s: string) {
-  try {
-    new URL(s)
-    return URL_RE.test(s)
-  } catch {
-    return false
-  }
-}
-
 // ── Component ──────────────────────────────────────────────────────────────
 
 export default function ChatBox() {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 'welcome',
-      role: 'assistant',
-      text: "Hi! I'm Booth Radar. Paste an exhibitor website URL and I'll scrape the brand and booth listings for you.",
-    },
-  ])
+  const [messages, setMessages] = useState<Message[]>([WELCOME])
   const [input, setInput] = useState('')
-  const [jobId, setJobId] = useState<string | null>(null)
-  const [results, setResults] = useState<BoothEntry[] | null>(null)
+  const [conversationId, setConversationId] = useState<string | null>(
+    () => localStorage.getItem(STORAGE_KEY),
+  )
+  const [turnId, setTurnId] = useState<string | null>(null)
+  const [results, setResults] = useState<BoothEntry[]>([])
   const [busy, setBusy] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const streamingMsgId = useRef<string | null>(null)
-  const workerOnline = useRef<boolean | null>(null)
 
-  // Keep-alive health check on mount
+  const addMessage = useCallback((msg: Message) => {
+    setMessages((prev) => [...prev, msg])
+  }, [])
+
+  // Worker health check on mount
   useEffect(() => {
     fetch('/api/health')
       .then((r) => r.json())
       .then((d: { workerConnected: boolean }) => {
-        workerOnline.current = d.workerConnected
         if (!d.workerConnected) {
           addMessage({
             id: genId(),
             role: 'system',
-            text: '⚠️ The scraper worker is currently offline. Jobs will fail until it reconnects.',
+            text: '⚠️ The Booth Radar worker is currently offline. Messages will fail until it reconnects.',
           })
         }
       })
+      .catch(() => {})
+  }, [addMessage])
+
+  // Restore the previous conversation on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    if (!saved) return
+    fetch(`/api/conversations/${saved}`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json() as Promise<ConversationResponse>
+      })
+      .then((c) => {
+        setMessages((prev) => [
+          WELCOME,
+          ...c.messages.map((m) => ({ id: genId(), role: m.role, text: m.content })),
+          ...prev.filter((m) => m.role === 'system'),
+        ])
+        setResults(c.results)
+        if (c.activeTurnId) {
+          setBusy(true)
+          setTurnId(c.activeTurnId)
+        }
+      })
       .catch(() => {
-        workerOnline.current = false
+        localStorage.removeItem(STORAGE_KEY)
+        setConversationId(null)
       })
   }, [])
 
   // Auto-scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, results])
 
-  function addMessage(msg: Message) {
-    setMessages((prev) => [...prev, msg])
+  // ── Stream handlers ──────────────────────────────────────────────────────
+
+  function finishStreaming() {
+    const id = streamingMsgId.current
+    streamingMsgId.current = null
+    if (!id) return
+    setMessages((prev) =>
+      prev
+        .filter((m) => m.id !== id || m.text.trim() !== '')
+        .map((m) => (m.id === id ? { ...m, streaming: false } : m)),
+    )
   }
 
-  function appendToken(text: string) {
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === streamingMsgId.current ? { ...m, text: m.text + text } : m
-      )
-    )
-  }
-
-  const handleDone = useCallback((res: BoothEntry[]) => {
-    setResults(res)
-    setBusy(false)
-    // Mark streaming message as finished
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === streamingMsgId.current ? { ...m, streaming: false } : m
-      )
-    )
-    streamingMsgId.current = null
-    // Add summary message
-    addMessage({
-      id: genId(),
-      role: 'assistant',
-      text: `✅ Done! Found **${res.length}** exhibitor${res.length !== 1 ? 's' : ''}. You can export the results below.`,
-    })
-  }, [])
-
-  const handleError = useCallback((message: string) => {
-    setBusy(false)
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === streamingMsgId.current ? { ...m, streaming: false } : m
-      )
-    )
-    streamingMsgId.current = null
-    addMessage({ id: genId(), role: 'system', text: `❌ ${message}` })
-  }, [])
-
-  useStream(jobId, {
-    onToken: appendToken,
-    onDone: handleDone,
-    onError: handleError,
-  })
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    const url = input.trim()
-    if (!url || busy) return
-
-    if (!isUrl(url)) {
-      addMessage({
-        id: genId(),
-        role: 'system',
-        text: "That doesn't look like a valid URL. Please include the full address (e.g. https://example.com/exhibitors).",
-      })
+  function handleToken(text: string) {
+    const id = streamingMsgId.current
+    if (!id) {
+      const newId = genId()
+      streamingMsgId.current = newId
+      addMessage({ id: newId, role: 'assistant', text, streaming: true })
       return
     }
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, text: m.text + text } : m)))
+  }
 
-    // Show user message
-    addMessage({ id: genId(), role: 'user', text: url })
+  function handleStatus(text: string) {
+    finishStreaming()
+    addMessage({ id: genId(), role: 'status', text })
+  }
+
+  function endTurn() {
+    finishStreaming()
+    setBusy(false)
+    setTurnId(null)
+  }
+
+  useStream(turnId, {
+    onToken: handleToken,
+    onStatus: handleStatus,
+    onResults: setResults,
+    onDone: (res) => {
+      setResults(res)
+      endTurn()
+    },
+    onError: (message) => {
+      endTurn()
+      addMessage({ id: genId(), role: 'system', text: `❌ ${message}` })
+    },
+  })
+
+  // ── Actions ──────────────────────────────────────────────────────────────
+
+  async function send() {
+    const text = input.trim()
+    if (!text || busy) return
+
+    addMessage({ id: genId(), role: 'user', text })
     setInput('')
     setBusy(true)
-    setResults(null)
-
-    // Kick off thinking message
-    const thinkingId = genId()
-    streamingMsgId.current = thinkingId
-    addMessage({ id: thinkingId, role: 'assistant', text: '', streaming: true })
 
     try {
-      const res = await fetch('/api/scrape', {
+      const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ conversationId, message: text }),
       })
-
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string }
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string
+        conversationId?: string
+        turnId?: string
+      }
+      if (!res.ok || !body.conversationId || !body.turnId) {
         throw new Error(body.error ?? `HTTP ${res.status}`)
       }
-
-      const { jobId: newJobId } = (await res.json()) as { jobId: string }
-      setJobId(newJobId)
+      setConversationId(body.conversationId)
+      localStorage.setItem(STORAGE_KEY, body.conversationId)
+      setTurnId(body.turnId)
     } catch (err) {
-      handleError((err as Error).message)
+      setBusy(false)
+      addMessage({ id: genId(), role: 'system', text: `❌ ${(err as Error).message}` })
     }
   }
+
+  function newChat() {
+    localStorage.removeItem(STORAGE_KEY)
+    streamingMsgId.current = null
+    setConversationId(null)
+    setTurnId(null)
+    setBusy(false)
+    setResults([])
+    setMessages([WELCOME])
+    setInput('')
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    void send()
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault()
+      void send()
+    }
+  }
+
+  const last = messages[messages.length - 1]
+  const showTyping = busy && !(last?.role === 'assistant' && last.streaming)
 
   return (
     <section className="chatbox">
+      <div className="chat-toolbar">
+        <span className="chat-toolbar-title">
+          {results.length > 0 ? `${results.length} row${results.length !== 1 ? 's' : ''} collected` : 'New conversation'}
+        </span>
+        <button className="chat-new" type="button" onClick={newChat}>
+          + New chat
+        </button>
+      </div>
+
       <div className="chat-messages">
         {messages.map((msg) => (
           <div key={msg.id} className={`bubble bubble--${msg.role}`}>
@@ -173,10 +231,20 @@ export default function ChatBox() {
           </div>
         ))}
 
-        {results && results.length > 0 && jobId && (
+        {showTyping && (
+          <div className="bubble bubble--assistant">
+            <span className="typing" aria-label="Booth Radar is thinking">
+              <span />
+              <span />
+              <span />
+            </span>
+          </div>
+        )}
+
+        {results.length > 0 && conversationId && (
           <div className="results-block">
             <ResultsTable results={results} />
-            <ExportButton jobId={jobId} />
+            <ExportButton conversationId={conversationId} />
           </div>
         )}
 
@@ -184,12 +252,13 @@ export default function ChatBox() {
       </div>
 
       <form className="chat-input-row" onSubmit={handleSubmit}>
-        <input
+        <textarea
           className="chat-input"
-          type="text"
-          placeholder="Paste exhibitor website URL…"
+          placeholder="Message Booth Radar… (Shift+Enter for a new line)"
           value={input}
+          rows={Math.min(6, Math.max(1, input.split('\n').length))}
           onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
           disabled={busy}
           autoFocus
         />
@@ -203,13 +272,28 @@ export default function ChatBox() {
 
 // ── Sub-components ─────────────────────────────────────────────────────────
 
+function escapeHtml(s: string) {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function renderMarkdown(text: string) {
+  return escapeHtml(text)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
+}
+
 function MessageContent({ text, streaming }: { text: string; streaming?: boolean }) {
-  // Render **bold** markdown only
-  const rendered = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
   return (
     <span
       className={streaming ? 'streaming-text' : ''}
-      dangerouslySetInnerHTML={{ __html: rendered || (streaming ? '<span class="cursor-blink">▌</span>' : '') }}
+      dangerouslySetInnerHTML={{
+        __html: renderMarkdown(text) + (streaming ? '<span class="cursor-blink">▌</span>' : ''),
+      }}
     />
   )
 }
