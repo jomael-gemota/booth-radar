@@ -114,72 +114,157 @@ def chat_stream(
     on_thinking: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
-    Run a streaming chat completion and return the full response text.
+    Run a streaming chat completion using raw HTTP so that custom SSE event
+    types emitted by the Hermes server (e.g. ``event: hermes.tool.progress``)
+    are captured.  The OpenAI Python SDK silently drops unknown event types,
+    which is why these never reached the caller before.
 
-    Thinking / reasoning tokens are routed to *on_thinking* (if provided)
-    and excluded from the returned text.  Two delivery formats are handled:
+    Thinking / reasoning tokens are routed to *on_thinking* (if provided).
+    Three sources are handled in priority order:
 
-    1. Native ``reasoning_content`` field on the delta object (xAI / some
-       OpenAI-compatible providers).
-    2. ``<think>…</think>`` tags embedded in the ``content`` stream
-       (NousResearch Hermes-3 native format).
+    1. ``event: hermes.tool.progress`` — Hermes native tool-execution events.
+       Running events are forwarded to *on_thinking* as a one-liner.
+    2. ``event: hermes.reason*`` — Hermes native reasoning events (if present).
+    3. ``reasoning_content`` field on the delta (xAI / DeepSeek-R1 style).
+    4. ``<think>…</think>`` tags inside ``content`` (Hermes-3 native text format).
     """
-    model     = os.getenv("HERMES_MODEL") or "hermes-agent"
-    full_text = ""
+    import urllib.request
+    import urllib.error
 
-    # Build a content accumulator that also feeds on_token.
+    base_url = (os.getenv("HERMES_BASE_URL") or "http://localhost:8642/v1").rstrip("/")
+    api_key  = os.getenv("HERMES_API_KEY") or "not-needed"
+    model    = os.getenv("HERMES_MODEL") or "hermes-agent"
+    url      = base_url + "/chat/completions"
+
+    payload = json.dumps({
+        "model":      model,
+        "messages":   messages,
+        "stream":     True,
+        "max_tokens": MAX_TOKENS,
+    }).encode()
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "Accept":        "text/event-stream",
+        },
+    )
+
+    full_text       = ""
+    thinking_chunks = 0
+    content_chunks  = 0
+
     def _handle_content(chunk: str) -> None:
-        nonlocal full_text
-        full_text += chunk
+        nonlocal full_text, content_chunks
+        full_text      += chunk
+        content_chunks += 1
         if on_token:
             on_token(chunk)
 
-    # Only allocate the filter when the caller wants thinking tokens.
     think_filt: Optional[_ThinkingFilter] = (
-        _ThinkingFilter(
-            on_content=_handle_content,
-            on_thinking=on_thinking,  # type: ignore[arg-type]
-        )
+        _ThinkingFilter(on_content=_handle_content, on_thinking=on_thinking)  # type: ignore[arg-type]
         if on_thinking
         else None
     )
 
-    stream = _get_client().chat.completions.create(
-        model=model,
-        messages=messages,  # type: ignore[arg-type]
-        stream=True,
-        max_tokens=MAX_TOKENS,
-    )
+    current_event: Optional[str] = None
 
-    thinking_chunks = 0
-    content_chunks  = 0
+    try:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
 
-    with stream:
-        for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
+                if not line:
+                    current_event = None   # blank line = end of SSE event
+                    continue
 
-            # ── Format 1: native reasoning_content field ──────────────────
-            reasoning = getattr(delta, "reasoning_content", None) or ""
-            if reasoning:
-                thinking_chunks += 1
-                if thinking_chunks == 1:
-                    log.debug("[extractor] thinking via reasoning_content detected")
-                if on_thinking:
-                    on_thinking(reasoning)
-                continue  # not part of the reply text
+                if line.startswith("event:"):
+                    current_event = line[6:].strip()
+                    continue
 
-            # ── Format 2: content stream (may contain <think> tags) ───────
-            content = getattr(delta, "content", None) or ""
-            if not content:
-                continue
+                if not line.startswith("data:"):
+                    continue
 
-            content_chunks += 1
-            if think_filt:
-                think_filt.feed(content)
-            else:
-                _handle_content(content)
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+
+                try:
+                    parsed = json.loads(data)
+                except json.JSONDecodeError:
+                    log.warning("[extractor] non-JSON SSE data: %r", data[:120])
+                    current_event = None
+                    continue
+
+                evt           = current_event
+                current_event = None
+
+                # ── hermes.tool.progress ──────────────────────────────────
+                if evt == "hermes.tool.progress":
+                    if parsed.get("status") == "running" and on_thinking:
+                        emoji = parsed.get("emoji", "⚙️")
+                        label = parsed.get("label") or parsed.get("tool", "tool")
+                        thinking_chunks += 1
+                        on_thinking(f"{emoji} {label}\n")
+                    continue
+
+                # ── hermes.reason* (reasoning / think events) ────────────
+                if evt and evt.startswith("hermes.reason"):
+                    text = (
+                        parsed.get("text")
+                        or parsed.get("content")
+                        or parsed.get("delta")
+                        or json.dumps(parsed)
+                    )
+                    if on_thinking and text:
+                        thinking_chunks += 1
+                        on_thinking(str(text))
+                    continue
+
+                # ── other hermes.* events — log for future discovery ──────
+                if evt and evt.startswith("hermes."):
+                    log.debug("[extractor] unhandled hermes event %r: %s", evt, json.dumps(parsed)[:200])
+                    continue
+
+                # ── standard OpenAI streaming chunk ───────────────────────
+                choices = parsed.get("choices")
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+
+                # Format 1: native reasoning_content (xAI / DeepSeek-R1)
+                reasoning = delta.get("reasoning_content") or ""
+                if reasoning:
+                    thinking_chunks += 1
+                    if thinking_chunks == 1:
+                        log.debug("[extractor] thinking via reasoning_content")
+                    if on_thinking:
+                        on_thinking(reasoning)
+                    continue
+
+                # Format 2: content stream (may embed <think> tags)
+                content = delta.get("content") or ""
+                if not content:
+                    continue
+
+                if think_filt:
+                    think_filt.feed(content)
+                else:
+                    _handle_content(content)
+
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read(300).decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        raise RuntimeError(f"Hermes API HTTP {exc.code} {exc.reason}: {body}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Hermes stream error: {exc}") from exc
 
     if think_filt:
         think_filt.flush()
@@ -189,10 +274,9 @@ def chat_stream(
         thinking_chunks, content_chunks, len(full_text),
     )
     if thinking_chunks == 0 and on_thinking:
-        log.info(
-            "[extractor] no thinking tokens received from Hermes "
-            "(model may not expose reasoning via this endpoint)"
-        )
+        log.info("[extractor] no thinking events from Hermes for this request")
+
+    return full_text
 
     return full_text
 
