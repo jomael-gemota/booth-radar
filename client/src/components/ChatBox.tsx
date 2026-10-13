@@ -33,17 +33,47 @@ interface ConversationResponse {
 const CONV_LIST_KEY   = 'booth-radar:conversations'
 const ACTIVE_CONV_KEY = 'booth-radar:conversationId'
 
-// ── Welcome message ──────────────────────────────────────────────────────────
+// ── Welcome sentinel (used as array marker — never rendered as a bubble) ─────
 
-const WELCOME: Message = {
-  id: 'welcome',
-  role: 'assistant',
-  text:
-    "Hi! I'm **Booth Radar**. Tell me which trade-show site to look at and what you need, for example:\n\n" +
-    '• "Get all exhibitors and booths from https://www.atlanta-apparel.com/exhibitor/Directory, every letter A–Z"\n' +
-    '• "Just scrape letters A to C for now"\n\n' +
-    "I'll collect the brands and booths into a table you can export as CSV.",
+const WELCOME: Message = { id: 'welcome', role: 'assistant', text: '' }
+
+// ── Suggestion cards ──────────────────────────────────────────────────────────
+
+interface SuggestionCard {
+  icon: string
+  title: string
+  hint: string
+  prompt: string
 }
+
+const SUGGESTIONS: SuggestionCard[] = [
+  {
+    icon: '🗂️',
+    title: 'Full A–Z directory',
+    hint: 'Collect every exhibitor across all letters',
+    prompt:
+      'Get all exhibitors and booths from https://www.atlanta-apparel.com/exhibitor/Directory, every letter A–Z',
+  },
+  {
+    icon: '🔤',
+    title: 'Partial letter range',
+    hint: 'Quick test run — letters A to C only',
+    prompt:
+      'Just scrape letters A to C from https://www.atlanta-apparel.com/exhibitor/Directory',
+  },
+  {
+    icon: '🌐',
+    title: 'Custom trade-show URL',
+    hint: 'Paste any exhibitor directory link',
+    prompt: 'Get all exhibitors and booths from ',
+  },
+  {
+    icon: '📤',
+    title: 'Export collected data',
+    hint: 'Download current booth results as CSV',
+    prompt: 'Export the collected exhibitor data as a CSV file.',
+  },
+]
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -248,8 +278,8 @@ export default function ChatBox() {
 
   // ── Send message ───────────────────────────────────────────────────────
 
-  async function send() {
-    const text = input.trim()
+  async function send(textOverride?: string) {
+    const text = (textOverride ?? input).trim()
     if (!text || busy) return
 
     addMessage({ id: genId(), role: 'user', text })
@@ -325,6 +355,21 @@ export default function ChatBox() {
       void send()
     }
   }
+
+  /** Called when the user clicks a suggestion card */
+  function handleSuggestion(prompt: string) {
+    // Prompts ending with a space need editing (e.g. "…from ") — just fill.
+    // Complete prompts auto-send immediately.
+    if (prompt.endsWith(' ')) {
+      setInput(prompt)
+      inputRef.current?.focus()
+    } else {
+      void send(prompt)
+    }
+  }
+
+  const isWelcomeState  = messages.length === 1 && messages[0].id === 'welcome'
+  const displayMessages = messages.filter((m) => m.id !== 'welcome')
 
   const last      = messages[messages.length - 1]
   const showTyping = busy && !(last?.role === 'assistant' && last.streaming)
@@ -432,9 +477,13 @@ export default function ChatBox() {
             </div>
           )}
 
-          {messages.map((msg) => (
-            <MessageBubble key={msg.id} msg={msg} />
-          ))}
+          {isWelcomeState ? (
+            <WelcomeScreen onSuggestion={handleSuggestion} />
+          ) : (
+            displayMessages.map((msg) => (
+              <MessageBubble key={msg.id} msg={msg} />
+            ))
+          )}
 
           {showTyping && <TypingIndicator />}
 
@@ -477,6 +526,38 @@ export default function ChatBox() {
         </div>
 
       </main>
+    </div>
+  )
+}
+
+// ── WelcomeScreen ────────────────────────────────────────────────────────────
+
+function WelcomeScreen({ onSuggestion }: { onSuggestion: (prompt: string) => void }) {
+  return (
+    <div className="welcome-screen">
+      <div className="welcome-hero">
+        <div className="welcome-icon" aria-hidden>📡</div>
+        <h2 className="welcome-heading">What would you like to scrape?</h2>
+        <p className="welcome-sub">
+          Point me at a trade-show exhibitor directory and I'll collect brands and
+          booth numbers into a table you can export as CSV.
+        </p>
+      </div>
+
+      <div className="suggestion-grid">
+        {SUGGESTIONS.map((s) => (
+          <button
+            key={s.title}
+            className="suggestion-card"
+            type="button"
+            onClick={() => onSuggestion(s.prompt)}
+          >
+            <span className="suggestion-icon" aria-hidden>{s.icon}</span>
+            <span className="suggestion-title">{s.title}</span>
+            <span className="suggestion-hint">{s.hint}</span>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
