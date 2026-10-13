@@ -557,44 +557,41 @@
 .thinking-wrap {
   max-width: 860px;
   width: calc(100% - 40px);
-  margin: 4px auto;
-  border-radius: var(--radius-sm);
-  border: 1px solid #3a2f60;
-  background: rgba(55, 35, 90, 0.12);
-  overflow: hidden;
+  margin: 0 auto 6px;
   box-sizing: border-box;
+  /* No border box — completely borderless container */
 }
 
 .thinking-header {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 9px 14px;
+  gap: 8px;
+  padding: 3px 0;
   background: transparent;
   border: none;
   cursor: pointer;
-  color: #9d8fd0;
-  font-size: 0.815rem;
+  color: #7a6aaa;
+  font-size: 0.8rem;
   font-style: italic;
   font-family: inherit;
   text-align: left;
-  transition: background 0.12s;
+  transition: color 0.15s;
   user-select: none;
+  border-radius: 4px;
 }
 
 .thinking-header:hover {
-  background: rgba(100, 70, 180, 0.09);
+  color: #b09de0;
 }
 
 /* The pulsing orb */
 .thinking-orb {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: #7460c8;
   flex-shrink: 0;
-  transition: box-shadow 0.2s;
+  transition: background 0.2s;
 }
 
 .thinking-orb--pulse {
@@ -605,10 +602,12 @@
   0%, 100% {
     box-shadow: 0 0 0 0   rgba(116, 96, 200, 0.5),
                 0 0 0 0   rgba(116, 96, 200, 0.3);
+    background: #7460c8;
   }
   50% {
-    box-shadow: 0 0 0 5px rgba(116, 96, 200, 0.15),
-                0 0 0 9px rgba(116, 96, 200, 0);
+    box-shadow: 0 0 0 4px rgba(116, 96, 200, 0.15),
+                0 0 0 8px rgba(116, 96, 200, 0);
+    background: #9d8fd0;
   }
 }
 
@@ -619,24 +618,99 @@
 }
 
 .thinking-chevron {
-  font-size: 0.58rem;
+  font-size: 0.6rem;
   color: #7460c8;
-  opacity: 0.8;
+  opacity: 0.7;
+  transition: opacity 0.15s, transform 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+}
+
+.thinking-chevron svg {
+  transition: transform 0.2s ease;
+}
+
+/* Expanded state — rotate chevron */
+.thinking-header[aria-expanded="true"] .thinking-chevron svg {
+  transform: rotate(180deg);
 }
 
 .thinking-body {
-  padding: 10px 16px 14px 32px;
-  border-top: 1px solid #3a2f60;
+  margin-top: 8px;
+  padding: 10px 14px 12px 16px;
+  border-left: 2px solid rgba(116, 96, 200, 0.28);
   font-size: 0.79rem;
-  line-height: 1.6;
+  line-height: 1.65;
   color: #7a6aaa;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 340px;
+  max-height: 320px;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: #3a2f60 transparent;
+  scrollbar-color: rgba(116, 96, 200, 0.25) transparent;
   font-style: italic;
+  /* Fade in */
+  animation: thinking-fade-in 0.2s ease;
+}
+
+@keyframes thinking-fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ASSISTANT MESSAGE ACTIONS (copy button etc.)
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.msg-bubble-wrapper {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: min(82%, 720px);
+}
+
+.msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 0 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+/* Show actions on hover of the whole row */
+.msg-row--assistant:hover .msg-actions {
+  opacity: 1;
+}
+
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 0.74rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  user-select: none;
+}
+
+.copy-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-muted);
+}
+
+.copy-btn--copied {
+  color: #7dba84 !important;
+}
+
+.copy-btn-label {
+  font-size: 0.73rem;
+  letter-spacing: 0.01em;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
