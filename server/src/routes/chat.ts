@@ -121,6 +121,57 @@ chatRouter.get('/stream/:turnId', (req: Request, res: Response) => {
   res.on('close', () => clearInterval(ping));
 });
 
+// ── POST /api/conversations/:id/generate-title ─────────────────────────────
+// Uses GPT-4o-mini to produce a concise 4–5 word title from the first message.
+chatRouter.post('/conversations/:id/generate-title', async (req: Request, res: Response) => {
+  const oid = parseId(req.params.id);
+  const convo = oid ? await conversations().findOne({ _id: oid }) : null;
+  if (!convo) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+
+  const firstUserMsg = convo.messages.find((m) => m.role === 'user')?.content ?? '';
+  const fallback = firstUserMsg.split(/\s+/).slice(0, 5).join(' ') || 'New conversation';
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    res.json({ title: fallback });
+    return;
+  }
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0.4,
+        max_tokens: 20,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You generate very short conversation titles. ' +
+              'Return ONLY the title — 4 to 5 words, no quotes, no punctuation at the end, title-case.',
+          },
+          {
+            role: 'user',
+            content: `First message: "${firstUserMsg.slice(0, 300)}"`,
+          },
+        ],
+      }),
+    });
+
+    interface OAIRes { choices: Array<{ message: { content: string } }> }
+    const data = (await response.json()) as OAIRes;
+    const raw = data.choices[0]?.message?.content?.trim() ?? '';
+    res.json({ title: raw || fallback });
+  } catch {
+    res.json({ title: fallback });
+  }
+});
+
 // ── GET /api/conversations/:id/export ──────────────────────────────────────
 // Returns the conversation's results table as a CSV file
 chatRouter.get('/conversations/:id/export', async (req: Request, res: Response) => {
