@@ -57,26 +57,24 @@ async function fetchGreeting(period: Period): Promise<GreetingPayload> {
     },
     body: JSON.stringify({
       model: 'gpt-4o-mini',
-      temperature: 0.9,
+      temperature: 0.6,
       max_tokens: 120,
       response_format: { type: 'json_object' },
       messages: [
         {
           role: 'system',
           content:
-            'You are the witty, charming personality of Booth Radar — an internal tool ' +
-            'that scrapes trade-show exhibitor directories to collect brand names and booth ' +
-            'locations for fashion and trade events. Your tone is sharp, warm, and professional.',
+            'You are the welcome screen of Booth Radar, an internal tool that scrapes ' +
+            'trade-show exhibitor directories to collect brand names and booth locations. ' +
+            'Write in clear, natural, professional English. No wordplay, no slogans, no cleverness.',
         },
         {
           role: 'user',
           content:
-            `The user is opening the app in the ${period}. ` +
-            'Write a welcome screen greeting and subtext. Strict rules:\n' +
-            '- greeting: maximum 8 words. Time-aware and clever. Avoid clichés like ' +
-            '"Good morning/afternoon/evening/night" — surprise and delight. Include "Booth Radar" naturally.\n' +
-            '- subtext: exactly 1 sentence, 15–22 words. Playfully describe what Booth ' +
-            'Radar does (scraping exhibitor directories, collecting brands and booth numbers, exporting as CSV).\n' +
+            `The user is opening the app in the ${period}. Write a short welcome greeting and one sentence of subtext.\n` +
+            'Rules:\n' +
+            '- greeting: use a proper time-appropriate salutation (e.g. "Good morning", "Good afternoon", "Good evening", "Good night") followed by a natural phrase that mentions Booth Radar. Maximum 10 words.\n' +
+            '- subtext: one clear sentence, 15–20 words, describing what the tool does in plain English — scraping exhibitor directories, collecting brands and booth numbers, exporting as CSV.\n' +
             'Respond only with valid JSON: {"greeting": "...", "subtext": "..."}',
         },
       ],
