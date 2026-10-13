@@ -5,6 +5,12 @@ export interface BoothEntry {
   booth: string
 }
 
+export interface Attachment {
+  id: string
+  name: string
+  size: number
+}
+
 interface ThinkingPayload  { text: string }
 interface TokenPayload     { text: string }
 interface StatusPayload    { text: string }
@@ -17,6 +23,7 @@ type Handler = {
   onToken:    (text: string) => void
   onStatus:   (text: string) => void
   onResults:  (results: BoothEntry[]) => void
+  onFile:     (file: Attachment) => void
   onDone:     (results: BoothEntry[]) => void
   onError:    (message: string) => void
 }
@@ -48,6 +55,10 @@ export function useStream(turnId: string | null, handlers: Handler) {
 
     es.addEventListener('results', (e) => {
       handlersRef.current.onResults((JSON.parse(e.data) as ResultsPayload).results)
+    })
+
+    es.addEventListener('file', (e) => {
+      handlersRef.current.onFile(JSON.parse(e.data) as Attachment)
     })
 
     es.addEventListener('done', (e) => {

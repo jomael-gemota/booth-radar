@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useStream, type BoothEntry } from '../hooks/useStream'
+import { useStream, type Attachment, type BoothEntry } from '../hooks/useStream'
 import ExportButton from './ExportButton'
 import './ChatBox.css'
 
@@ -12,6 +12,7 @@ interface Message {
   role: Role
   text: string
   streaming?: boolean
+  attachments?: Attachment[]
 }
 
 interface ConversationSummary {
@@ -24,7 +25,7 @@ interface ConversationSummary {
 
 interface ConversationResponse {
   id: string
-  messages: { role: 'user' | 'assistant' | 'thinking'; content: string }[]
+  messages: { role: 'user' | 'assistant' | 'thinking'; content: string; attachments?: Attachment[] }[]
   results: BoothEntry[]
   activeTurnId: string | null
 }
@@ -178,7 +179,12 @@ export default function ChatBox() {
       thinkingMsgId.current  = null
       setMessages([
         WELCOME,
-        ...c.messages.map((m) => ({ id: genId(), role: m.role as Role, text: m.content })),
+        ...c.messages.map((m) => ({
+          id:          genId(),
+          role:        m.role as Role,
+          text:        m.content,
+          attachments: m.attachments,
+        })),
       ])
       setResults(c.results)
       setConversationId(id)
@@ -224,7 +230,7 @@ export default function ChatBox() {
     if (id) {
       setMessages((prev) =>
         prev
-          .filter((m) => m.id !== id || m.text.trim() !== '')
+          .filter((m) => m.id !== id || m.text.trim() !== '' || m.attachments?.length)
           .map((m) => (m.id === id ? { ...m, streaming: false } : m)),
       )
     }
@@ -259,6 +265,20 @@ export default function ChatBox() {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, text: m.text + text } : m)))
   }
 
+  /** Attach a file to the turn's latest assistant bubble, creating one if needed. */
+  function handleFile(file: Attachment) {
+    setMessages((prev) => {
+      const lastUser = prev.map((m) => m.role).lastIndexOf('user')
+      const idx      = prev.map((m) => m.role).lastIndexOf('assistant')
+      if (idx > lastUser && prev[idx].id !== 'welcome') {
+        return prev.map((m, i) =>
+          i === idx ? { ...m, attachments: [...(m.attachments ?? []), file] } : m,
+        )
+      }
+      return [...prev, { id: genId(), role: 'assistant', text: '', attachments: [file] }]
+    })
+  }
+
   function handleStatus(text: string) {
     finishStreaming()
     addMessage({ id: genId(), role: 'status', text })
@@ -280,6 +300,7 @@ export default function ChatBox() {
     onToken:    handleToken,
     onStatus:   handleStatus,
     onResults:  setResults,
+    onFile:     handleFile,
     onDone: (res) => {
       setResults(res)
       endTurn()
@@ -703,9 +724,16 @@ function MessageBubble({ msg, conversationId, hasResults }: MessageBubbleProps) 
         <RadarLogoIcon />
       </div>
       <div className="msg-bubble-wrapper">
-        <div className="msg-bubble msg-bubble--assistant">
-          <MessageContent text={msg.text} streaming={msg.streaming} />
-        </div>
+        {(msg.text || msg.streaming) && (
+          <div className="msg-bubble msg-bubble--assistant">
+            <MessageContent text={msg.text} streaming={msg.streaming} />
+          </div>
+        )}
+        {msg.attachments && msg.attachments.length > 0 && (
+          <div className="attachment-list">
+            {msg.attachments.map((a) => <AttachmentChip key={a.id} file={a} />)}
+          </div>
+        )}
         {!msg.streaming && msg.text.trim() && (
           <div className="msg-actions">
             <CopyButton text={msg.text} />
@@ -884,6 +912,34 @@ function ExportCsvButton({ conversationId }: { conversationId: string }) {
         {state === 'loading' ? 'Exporting…' : state === 'done' ? 'Exported' : 'Export CSV'}
       </span>
     </button>
+  )
+}
+
+// ── AttachmentChip ───────────────────────────────────────────────────────────
+
+function formatBytes(n: number) {
+  if (n < 1024)        return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function AttachmentChip({ file }: { file: Attachment }) {
+  const dot = file.name.lastIndexOf('.')
+  const ext = dot > 0 ? file.name.slice(dot + 1).toUpperCase() : 'FILE'
+  return (
+    <a
+      className="attachment-chip"
+      href={`/api/files/${file.id}`}
+      download={file.name}
+      title={`Download ${file.name}`}
+    >
+      <span className="attachment-chip-ext">{ext}</span>
+      <span className="attachment-chip-meta">
+        <span className="attachment-chip-name">{file.name}</span>
+        <span className="attachment-chip-size">{formatBytes(file.size)}</span>
+      </span>
+      <span className="attachment-chip-icon"><DownloadIcon /></span>
+    </a>
   )
 }
 

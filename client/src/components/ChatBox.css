@@ -728,6 +728,71 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   ATTACHMENTS
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 0 2px;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 360px;
+  padding: 8px 12px 8px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.attachment-chip:hover {
+  background: var(--surface-hover);
+  border-color: var(--accent);
+}
+
+.attachment-chip-ext {
+  flex-shrink: 0;
+  padding: 6px 7px;
+  border-radius: 6px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.attachment-chip-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.attachment-chip-name {
+  overflow: hidden;
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip-size {
+  color: var(--text-faint);
+  font-size: 0.72rem;
+}
+
+.attachment-chip-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    RESULTS TABLE
    ══════════════════════════════════════════════════════════════════════════ */
 
