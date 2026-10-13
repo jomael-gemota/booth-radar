@@ -8,6 +8,7 @@ import fs from 'fs';
 import { connectDb } from './db.js';
 import { attachWorker, isWorkerConnected } from './relay.js';
 import { chatRouter } from './routes/chat.js';
+import { greetingRouter } from './routes/greeting.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
@@ -26,6 +27,7 @@ async function main() {
   app.use(express.json());
 
   app.use('/api', chatRouter);
+  app.use('/api', greetingRouter);
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, workerConnected: isWorkerConnected() });
