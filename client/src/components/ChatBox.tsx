@@ -683,8 +683,15 @@ function MessageBubble({ msg }: { msg: Message }) {
       <div className="msg-avatar" aria-hidden>
         <RadarLogoIcon />
       </div>
-      <div className="msg-bubble msg-bubble--assistant">
-        <MessageContent text={msg.text} streaming={msg.streaming} />
+      <div className="msg-bubble-wrapper">
+        <div className="msg-bubble msg-bubble--assistant">
+          <MessageContent text={msg.text} streaming={msg.streaming} />
+        </div>
+        {!msg.streaming && msg.text.trim() && (
+          <div className="msg-actions">
+            <CopyButton text={msg.text} />
+          </div>
+        )}
       </div>
     </div>
   )
@@ -738,6 +745,7 @@ function MessageContent({ text, streaming }: { text: string; streaming?: boolean
 // ── ThinkingBubble ───────────────────────────────────────────────────────────
 
 function ThinkingBubble({ text, streaming }: { text: string; streaming?: boolean }) {
+  // Auto-expand while streaming; collapse (but keep accessible) once done
   const [expanded, setExpanded] = useState(!!streaming)
 
   useEffect(() => {
@@ -758,7 +766,7 @@ function ThinkingBubble({ text, streaming }: { text: string; streaming?: boolean
           {streaming ? 'Thinking…' : 'View reasoning'}
         </span>
         <span className="thinking-chevron" aria-hidden>
-          {expanded ? '▲' : '▼'}
+          <ChevronDownIcon />
         </span>
       </button>
 
@@ -812,6 +820,31 @@ function ResultsTable({ results }: { results: BoothEntry[] }) {
         </tbody>
       </table>
     </div>
+  )
+}
+
+// ── CopyButton ───────────────────────────────────────────────────────────────
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+
+  function handleCopy() {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }).catch(() => {})
+  }
+
+  return (
+    <button
+      type="button"
+      className={`copy-btn${copied ? ' copy-btn--copied' : ''}`}
+      onClick={handleCopy}
+      title={copied ? 'Copied!' : 'Copy response'}
+    >
+      {copied ? <CheckIcon /> : <CopyIcon />}
+      <span className="copy-btn-label">{copied ? 'Copied' : 'Copy'}</span>
+    </button>
   )
 }
 
@@ -912,4 +945,32 @@ function MenuIcon() {
 
 function Spinner() {
   return <span className="spinner" aria-label="Loading" />
+}
+
+function CopyIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  )
+}
+
+function CheckIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  )
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  )
 }
