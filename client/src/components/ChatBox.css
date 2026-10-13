@@ -756,13 +756,14 @@
 
 .input-wrapper {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 8px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px 10px 10px 16px;
   transition: border-color 0.15s, box-shadow 0.15s;
+  min-height: 52px;
 }
 
 .input-wrapper:focus-within {
@@ -781,10 +782,20 @@
   resize: none;
   outline: none;
   min-height: 24px;
+  /* Center placeholder text when idle (single row) */
+  display: flex;
+  align-items: center;
+  text-align: center;
+}
+
+/* Once the user starts typing, snap back to left-aligned */
+.chat-input:not(:placeholder-shown) {
+  text-align: left;
 }
 
 .chat-input::placeholder {
-  color: var(--text-faint);
+  color: var(--text-muted);
+  text-align: center;
 }
 
 .chat-input:disabled {

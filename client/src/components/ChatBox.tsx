@@ -395,7 +395,7 @@ export default function ChatBox() {
           <textarea
             ref={inputRef}
             className="chat-input"
-            placeholder="Message Booth Radar… (Shift+Enter for new line)"
+            placeholder="Ask Booth Radar"
             value={input}
             rows={Math.min(6, Math.max(1, input.split('\n').length))}
             onChange={(e) => setInput(e.target.value)}
