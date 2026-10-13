@@ -916,26 +916,13 @@ function CopyButton({ text }: { text: string }) {
 
 function RadarLogoIcon({ className }: { className?: string }) {
   return (
-    <svg
+    <img
+      src="/logo.png"
+      alt="Booth Radar"
       className={className}
-      viewBox="0 0 32 32"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
       aria-hidden="true"
-    >
-      {/* Outer ring */}
-      <circle cx="16" cy="16" r="13" stroke="currentColor" strokeWidth="1.5" opacity="0.25" />
-      {/* Mid ring */}
-      <circle cx="16" cy="16" r="8.5" stroke="currentColor" strokeWidth="1.5" opacity="0.5" />
-      {/* Inner ring */}
-      <circle cx="16" cy="16" r="4" stroke="currentColor" strokeWidth="1.5" opacity="0.75" />
-      {/* Center dot */}
-      <circle cx="16" cy="16" r="1.75" fill="currentColor" />
-      {/* Sweep line */}
-      <line x1="16" y1="16" x2="27" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" opacity="0.6" />
-      {/* Blip — detected booth */}
-      <circle cx="25.5" cy="10.5" r="2" fill="currentColor" opacity="0.9" />
-    </svg>
+      draggable={false}
+    />
   )
 }
 
