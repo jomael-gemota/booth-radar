@@ -830,14 +830,13 @@
 
 .input-wrapper {
   display: flex;
-  align-items: center;
+  align-items: flex-end; /* keep send button anchored to bottom as textarea grows */
   gap: 8px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px 10px 10px 16px;
   transition: border-color 0.15s, box-shadow 0.15s;
-  min-height: 52px;
 }
 
 .input-wrapper:focus-within {
@@ -855,10 +854,14 @@
   line-height: 1.5;
   resize: none;
   outline: none;
+  /* Single-row height by default; JS will expand via scrollHeight */
   min-height: 24px;
+  max-height: 200px;   /* ~6 lines — scrollable beyond this */
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
   /* Center placeholder text when idle (single row) */
-  display: flex;
-  align-items: center;
+  display: block;
   text-align: center;
 }
 
@@ -877,11 +880,12 @@
   cursor: not-allowed;
 }
 
-/* Send button */
+/* Send button — anchored to bottom-right as textarea grows */
 .send-btn {
   display: flex;
   align-items: center;
   justify-content: center;
+  align-self: flex-end;   /* stays at bottom line when textarea is multi-row */
   width: 34px;
   height: 34px;
   border-radius: 8px;

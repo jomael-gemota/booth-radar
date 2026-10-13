@@ -115,6 +115,14 @@ export default function ChatBox() {
   const thinkingMsgId  = useRef<string | null>(null)
   const inputRef       = useRef<HTMLTextAreaElement>(null)
 
+  // ── Auto-resize textarea ───────────────────────────────────────────────
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'           // shrink first to get accurate scrollHeight
+    el.style.height = `${el.scrollHeight}px`
+  }, [input])
+
   // Refs for title generation (avoid stale closure issues)
   const conversationIdRef = useRef<string | null>(conversationId)
   const isFirstTurnRef    = useRef(false)
@@ -397,7 +405,7 @@ export default function ChatBox() {
             className="chat-input"
             placeholder="Ask Booth Radar"
             value={input}
-            rows={Math.min(6, Math.max(1, input.split('\n').length))}
+            rows={1}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={busy}
