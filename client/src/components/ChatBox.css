@@ -56,9 +56,10 @@
 }
 
 .sidebar-brand-icon {
-  font-size: 1.15rem;
+  width: 22px;
+  height: 22px;
   flex-shrink: 0;
-  line-height: 1;
+  color: var(--accent);
 }
 
 .sidebar-brand-name {
@@ -198,24 +199,47 @@
   line-height: 1.35;
 }
 
-.conv-item-delete {
+/* ── Conv-item action buttons (pin + delete) ───────────────────────────── */
+
+.conv-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
   opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.conv-item:hover .conv-item-actions,
+.conv-item--active .conv-item-actions {
+  opacity: 1;
+}
+
+.conv-item-pin,
+.conv-item-delete {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   font-size: 0.65rem;
   color: var(--text-faint);
   border-radius: 4px;
-  transition: opacity 0.1s, color 0.1s, background 0.1s;
+  transition: color 0.1s, background 0.1s;
   cursor: pointer;
   flex-shrink: 0;
   line-height: 1;
 }
 
-.conv-item:hover .conv-item-delete {
-  opacity: 1;
+.conv-item-pin:hover {
+  color: var(--accent-hover);
+  background: var(--accent-dim);
+}
+
+/* Pinned state — always visible with accent tint */
+.conv-item-pin--active {
+  color: var(--accent);
+  opacity: 1 !important;
 }
 
 .conv-item-delete:hover {
@@ -223,18 +247,16 @@
   background: rgba(255, 107, 107, 0.12);
 }
 
-/* ── Sidebar footer ─────────────────────────────────────────────────────── */
+/* ── Pinned group label icon ─────────────────────────────────────────────── */
 
-.sidebar-footer {
-  padding: 10px 12px;
-  border-top: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.sidebar-footer-text {
-  font-size: 0.7rem;
-  color: var(--text-faint);
-  letter-spacing: 0.01em;
+.conv-group-pin-icon {
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 4px;
+  margin-bottom: 1px;
+  opacity: 0.7;
+  width: 9px;
+  height: 9px;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -354,10 +376,15 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.8rem;
   flex-shrink: 0;
   margin-top: 4px;
   user-select: none;
+  color: var(--accent);
+}
+
+.msg-avatar svg {
+  width: 15px;
+  height: 15px;
 }
 
 /* ── Bubbles ────────────────────────────────────────────────────────────── */
@@ -672,6 +699,35 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   WELCOME CENTER LAYOUT — input centered on new-chat state
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.welcome-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  overflow: hidden;
+  padding-bottom: 24px;
+}
+
+/* In welcome layout the input-area sits below the greeting, centered */
+.input-area--welcome {
+  width: 100%;
+  max-width: 820px;
+  padding: 0 20px;
+  border-top: none !important;
+  background: transparent !important;
+  margin-top: 28px;
+}
+
+.input-area--welcome .input-form {
+  max-width: 100%;
+  margin: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    INPUT AREA
    ══════════════════════════════════════════════════════════════════════════ */
 
@@ -778,10 +834,12 @@
 }
 
 .welcome-icon {
-  font-size: 3rem;
-  line-height: 1;
+  width: 64px;
+  height: 64px;
+  color: var(--accent);
   animation: icon-float 4s ease-in-out infinite;
   user-select: none;
+  flex-shrink: 0;
 }
 
 @keyframes icon-float {

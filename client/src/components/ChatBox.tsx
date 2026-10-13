@@ -19,6 +19,7 @@ interface ConversationSummary {
   title: string
   preview: string
   createdAt: number
+  pinned?: boolean
 }
 
 interface ConversationResponse {
@@ -114,6 +115,14 @@ export default function ChatBox() {
   const thinkingMsgId  = useRef<string | null>(null)
   const inputRef       = useRef<HTMLTextAreaElement>(null)
 
+  // Refs for title generation (avoid stale closure issues)
+  const conversationIdRef = useRef<string | null>(conversationId)
+  const isFirstTurnRef    = useRef(false)
+
+  useEffect(() => {
+    conversationIdRef.current = conversationId
+  }, [conversationId])
+
   const addMessage = useCallback((msg: Message) => {
     setMessages((prev) => [...prev, msg])
   }, [])
@@ -165,6 +174,7 @@ export default function ChatBox() {
       ])
       setResults(c.results)
       setConversationId(id)
+      conversationIdRef.current = id
       localStorage.setItem(ACTIVE_CONV_KEY, id)
       if (c.activeTurnId) {
         setBusy(true)
@@ -177,6 +187,24 @@ export default function ChatBox() {
       }
     } finally {
       setLoadingConv(false)
+    }
+  }
+
+  // ── Generate AI title for a new conversation ───────────────────────────
+
+  async function generateTitle(convId: string) {
+    try {
+      const r = await fetch(`/api/conversations/${convId}/generate-title`, { method: 'POST' })
+      if (!r.ok) return
+      const { title } = (await r.json()) as { title: string }
+      if (!title) return
+      setConversations((prev) => {
+        const updated = prev.map((c) => (c.id === convId ? { ...c, title } : c))
+        saveConversations(updated)
+        return updated
+      })
+    } catch {
+      // Non-critical — fallback title stays
     }
   }
 
@@ -232,6 +260,11 @@ export default function ChatBox() {
     finishStreaming()
     setBusy(false)
     setTurnId(null)
+    // Generate a proper title for the first turn of a new conversation
+    if (isFirstTurnRef.current && conversationIdRef.current) {
+      void generateTitle(conversationIdRef.current)
+      isFirstTurnRef.current = false
+    }
   }
 
   useStream(turnId, {
@@ -275,11 +308,13 @@ export default function ChatBox() {
       }
 
       setConversationId(body.conversationId)
+      conversationIdRef.current = body.conversationId
       localStorage.setItem(ACTIVE_CONV_KEY, body.conversationId)
       setTurnId(body.turnId)
 
       // Track in sidebar — add if it's a brand-new conversation
       if (!conversations.find((c) => c.id === body.conversationId)) {
+        isFirstTurnRef.current = true
         const summary: ConversationSummary = {
           id:        body.conversationId!,
           title:     truncate(text, 42),
@@ -301,6 +336,7 @@ export default function ChatBox() {
     streamingMsgId.current = null
     thinkingMsgId.current  = null
     setConversationId(null)
+    conversationIdRef.current = null
     setTurnId(null)
     setBusy(false)
     setResults([])
@@ -315,6 +351,15 @@ export default function ChatBox() {
     setConversations(updated)
     saveConversations(updated)
     if (conversationId === id) newChat()
+  }
+
+  function pinConversation(id: string, e: React.MouseEvent) {
+    e.stopPropagation()
+    const updated = conversations.map((c) =>
+      c.id === id ? { ...c, pinned: !c.pinned } : c,
+    )
+    setConversations(updated)
+    saveConversations(updated)
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -338,6 +383,37 @@ export default function ChatBox() {
     ? (conversations.find((c) => c.id === conversationId)?.title ?? 'Conversation')
     : 'New chat'
 
+  const pinnedConvs  = conversations.filter((c) => c.pinned)
+  const unpinnedConvs = conversations.filter((c) => !c.pinned)
+
+  // ── Shared input form renderer ─────────────────────────────────────────
+
+  function renderInputForm() {
+    return (
+      <form className="input-form" onSubmit={handleSubmit}>
+        <div className="input-wrapper">
+          <textarea
+            ref={inputRef}
+            className="chat-input"
+            placeholder="Message Booth Radar… (Shift+Enter for new line)"
+            value={input}
+            rows={Math.min(6, Math.max(1, input.split('\n').length))}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={busy}
+            autoFocus
+          />
+          <button className="send-btn" type="submit" disabled={busy || !input.trim()}>
+            {busy ? <Spinner /> : <SendIcon />}
+          </button>
+        </div>
+        <p className="input-hint">
+          Booth Radar can make mistakes. Verify important data before use.
+        </p>
+      </form>
+    )
+  }
+
   // ── Render ─────────────────────────────────────────────────────────────
 
   return (
@@ -348,7 +424,7 @@ export default function ChatBox() {
 
         <div className="sidebar-top">
           <div className="sidebar-brand">
-            <span className="sidebar-brand-icon">📡</span>
+            <RadarLogoIcon className="sidebar-brand-icon" />
             {sidebarOpen && <span className="sidebar-brand-name">Booth Radar</span>}
           </div>
           <button
@@ -370,40 +446,45 @@ export default function ChatBox() {
             {conversations.length === 0 ? (
               <p className="conv-empty">No conversations yet</p>
             ) : (
-              groupByDate(conversations).map((group) => (
-                <div key={group.label} className="conv-group">
-                  <p className="conv-group-label">{group.label}</p>
-                  {group.items.map((conv) => (
-                    <button
-                      key={conv.id}
-                      className={`conv-item${conv.id === conversationId ? ' conv-item--active' : ''}`}
-                      onClick={() => void loadConversation(conv.id)}
-                      title={conv.title}
-                    >
-                      <span className="conv-item-title">{conv.title}</span>
-                      <span
-                        className="conv-item-delete"
-                        role="button"
-                        tabIndex={0}
-                        onClick={(e) => deleteConversation(conv.id, e)}
-                        onKeyDown={(e) => e.key === 'Enter' && deleteConversation(conv.id, e as unknown as React.MouseEvent)}
-                        title="Delete conversation"
-                        aria-label="Delete conversation"
-                      >
-                        ✕
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              ))
+              <>
+                {/* ── Pinned section ─────────────────────────────── */}
+                {pinnedConvs.length > 0 && (
+                  <div className="conv-group">
+                    <p className="conv-group-label">
+                      <PinIcon className="conv-group-pin-icon" /> Pinned
+                    </p>
+                    {pinnedConvs.map((conv) => (
+                      <ConvItem
+                        key={conv.id}
+                        conv={conv}
+                        active={conv.id === conversationId}
+                        onSelect={() => void loadConversation(conv.id)}
+                        onPin={(e) => pinConversation(conv.id, e)}
+                        onDelete={(e) => deleteConversation(conv.id, e)}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* ── Date-grouped unpinned ──────────────────────── */}
+                {groupByDate(unpinnedConvs).map((group) => (
+                  <div key={group.label} className="conv-group">
+                    <p className="conv-group-label">{group.label}</p>
+                    {group.items.map((conv) => (
+                      <ConvItem
+                        key={conv.id}
+                        conv={conv}
+                        active={conv.id === conversationId}
+                        onSelect={() => void loadConversation(conv.id)}
+                        onPin={(e) => pinConversation(conv.id, e)}
+                        onDelete={(e) => deleteConversation(conv.id, e)}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </>
             )}
           </nav>
-        )}
-
-        {sidebarOpen && (
-          <div className="sidebar-footer">
-            <span className="sidebar-footer-text">Booth Radar · Internal Tool</span>
-          </div>
         )}
       </aside>
 
@@ -429,65 +510,98 @@ export default function ChatBox() {
           )}
         </header>
 
-        {/* Messages */}
-        <div className="chat-messages">
-          {loadingConv && (
-            <div className="conv-loading">
-              <span className="spinner spinner--sm" />
-              Loading conversation…
-            </div>
-          )}
-
-          {isWelcomeState ? (
+        {isWelcomeState ? (
+          /* ── Welcome / centered-input layout ─────────────────────── */
+          <div className="welcome-center">
             <WelcomeScreen />
-          ) : (
-            displayMessages.map((msg) => (
-              <MessageBubble key={msg.id} msg={msg} />
-            ))
-          )}
-
-          {showTyping && <TypingIndicator />}
-
-          {results.length > 0 && conversationId && (
-            <div className="results-block">
-              <p className="results-label">
-                📊 {results.length} exhibitor{results.length !== 1 ? 's' : ''} collected
-              </p>
-              <ResultsTable results={results} />
-              <ExportButton conversationId={conversationId} />
+            <div className="input-area input-area--welcome">
+              {renderInputForm()}
             </div>
-          )}
+          </div>
+        ) : (
+          /* ── Normal chat layout ───────────────────────────────────── */
+          <>
+            <div className="chat-messages">
+              {loadingConv && (
+                <div className="conv-loading">
+                  <span className="spinner spinner--sm" />
+                  Loading conversation…
+                </div>
+              )}
 
-          <div ref={bottomRef} />
-        </div>
+              {displayMessages.map((msg) => (
+                <MessageBubble key={msg.id} msg={msg} />
+              ))}
 
-        {/* Input */}
-        <div className="input-area">
-          <form className="input-form" onSubmit={handleSubmit}>
-            <div className="input-wrapper">
-              <textarea
-                ref={inputRef}
-                className="chat-input"
-                placeholder="Message Booth Radar… (Shift+Enter for new line)"
-                value={input}
-                rows={Math.min(6, Math.max(1, input.split('\n').length))}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                disabled={busy}
-                autoFocus
-              />
-              <button className="send-btn" type="submit" disabled={busy || !input.trim()}>
-                {busy ? <Spinner /> : <SendIcon />}
-              </button>
+              {showTyping && <TypingIndicator />}
+
+              {results.length > 0 && conversationId && (
+                <div className="results-block">
+                  <p className="results-label">
+                    📊 {results.length} exhibitor{results.length !== 1 ? 's' : ''} collected
+                  </p>
+                  <ResultsTable results={results} />
+                  <ExportButton conversationId={conversationId} />
+                </div>
+              )}
+
+              <div ref={bottomRef} />
             </div>
-            <p className="input-hint">
-              Booth Radar can make mistakes. Verify important data before use.
-            </p>
-          </form>
-        </div>
+
+            <div className="input-area">
+              {renderInputForm()}
+            </div>
+          </>
+        )}
 
       </main>
     </div>
+  )
+}
+
+// ── ConvItem ─────────────────────────────────────────────────────────────────
+
+interface ConvItemProps {
+  conv: ConversationSummary
+  active: boolean
+  onSelect: () => void
+  onPin: (e: React.MouseEvent) => void
+  onDelete: (e: React.MouseEvent) => void
+}
+
+function ConvItem({ conv, active, onSelect, onPin, onDelete }: ConvItemProps) {
+  return (
+    <button
+      className={`conv-item${active ? ' conv-item--active' : ''}`}
+      onClick={onSelect}
+      title={conv.title}
+    >
+      <span className="conv-item-title">{conv.title}</span>
+      <span className="conv-item-actions">
+        <span
+          className={`conv-item-pin${conv.pinned ? ' conv-item-pin--active' : ''}`}
+          role="button"
+          tabIndex={0}
+          onClick={onPin}
+          onKeyDown={(e) => e.key === 'Enter' && onPin(e as unknown as React.MouseEvent)}
+          title={conv.pinned ? 'Unpin conversation' : 'Pin conversation'}
+          aria-label={conv.pinned ? 'Unpin conversation' : 'Pin conversation'}
+        >
+          <PinIcon />
+        </span>
+        <span
+          className="conv-item-delete"
+          role="button"
+          tabIndex={0}
+          onClick={onDelete}
+          onKeyDown={(e) => e.key === 'Enter' && onDelete(e as unknown as React.MouseEvent)}
+          title="Delete conversation"
+          aria-label="Delete conversation"
+        >
+          ✕
+        </span>
+      </span>
+    </button>
   )
 }
 
@@ -508,12 +622,10 @@ function WelcomeScreen() {
         setContent(data)
       })
       .catch(() => {
-        // Server unreachable or key missing — use client-side fallback
         setContent(getStaticGreeting())
       })
   }, [])
 
-  // Tiny delay before fading in so the transition is always visible
   useEffect(() => {
     if (!content) return
     const t = setTimeout(() => setVisible(true), 40)
@@ -522,7 +634,7 @@ function WelcomeScreen() {
 
   return (
     <div className="welcome-screen">
-      <div className="welcome-icon" aria-hidden>📡</div>
+      <RadarLogoIcon className="welcome-icon" />
       <div className={`welcome-text${visible ? ' welcome-text--visible' : ''}`}>
         <h2 className="welcome-heading">
           {content?.greeting ?? ''}
@@ -568,7 +680,9 @@ function MessageBubble({ msg }: { msg: Message }) {
   // assistant
   return (
     <div className="msg-row msg-row--assistant">
-      <div className="msg-avatar" aria-hidden>📡</div>
+      <div className="msg-avatar" aria-hidden>
+        <RadarLogoIcon />
+      </div>
       <div className="msg-bubble msg-bubble--assistant">
         <MessageContent text={msg.text} streaming={msg.streaming} />
       </div>
@@ -590,24 +704,19 @@ function escapeHtml(s: string) {
 function renderMarkdown(text: string) {
   let html = escapeHtml(text)
 
-  // Fenced code blocks  ``` ... ```
   html = html.replace(/```([\s\S]*?)```/g, (_, code: string) =>
     `<pre class="code-block"><code>${code.replace(/^\n/, '')}</code></pre>`,
   )
 
-  // Inline code  `...`
   html = html.replace(/`([^`\n]+)`/g, '<code class="code-inline">$1</code>')
 
-  // Bold  **...**
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
 
-  // Auto-linked URLs
   html = html.replace(
     /(https?:\/\/[^\s<"]+[^\s<.,;:!?)\]'"&])/g,
     '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>',
   )
 
-  // Line breaks
   html = html.replace(/\n/g, '<br/>')
 
   return html
@@ -667,7 +776,9 @@ function ThinkingBubble({ text, streaming }: { text: string; streaming?: boolean
 function TypingIndicator() {
   return (
     <div className="msg-row msg-row--assistant">
-      <div className="msg-avatar" aria-hidden>📡</div>
+      <div className="msg-avatar" aria-hidden>
+        <RadarLogoIcon />
+      </div>
       <div className="msg-bubble msg-bubble--assistant">
         <span className="typing-dots" aria-label="Booth Radar is thinking">
           <span /><span /><span />
@@ -704,7 +815,32 @@ function ResultsTable({ results }: { results: BoothEntry[] }) {
   )
 }
 
-// ── Icon components ──────────────────────────────────────────────────────────
+// ── Icon & Logo components ───────────────────────────────────────────────────
+
+function RadarLogoIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 32 32"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      {/* Outer ring */}
+      <circle cx="16" cy="16" r="13" stroke="currentColor" strokeWidth="1.5" opacity="0.25" />
+      {/* Mid ring */}
+      <circle cx="16" cy="16" r="8.5" stroke="currentColor" strokeWidth="1.5" opacity="0.5" />
+      {/* Inner ring */}
+      <circle cx="16" cy="16" r="4" stroke="currentColor" strokeWidth="1.5" opacity="0.75" />
+      {/* Center dot */}
+      <circle cx="16" cy="16" r="1.75" fill="currentColor" />
+      {/* Sweep line */}
+      <line x1="16" y1="16" x2="27" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" opacity="0.6" />
+      {/* Blip — detected booth */}
+      <circle cx="25.5" cy="10.5" r="2" fill="currentColor" opacity="0.9" />
+    </svg>
+  )
+}
 
 function SendIcon() {
   return (
@@ -722,6 +858,25 @@ function PlusIcon() {
       strokeWidth="2.5" strokeLinecap="round">
       <line x1="12" y1="5" x2="12" y2="19" />
       <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  )
+}
+
+function PinIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <line x1="12" y1="17" x2="12" y2="22" />
+      <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z" />
     </svg>
   )
 }
