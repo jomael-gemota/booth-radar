@@ -3,6 +3,7 @@ import { ObjectId } from 'mongodb';
 import {
   activeTurnFor,
   conversations,
+  files,
   isWorkerConnected,
   startTurn,
   subscribe,
@@ -96,7 +97,7 @@ chatRouter.get('/conversations/:id', async (req: Request, res: Response) => {
   }
   res.json({
     id: convo._id.toHexString(),
-    messages: convo.messages.map(({ role, content }) => ({ role, content })),
+    messages: convo.messages.map(({ role, content, attachments }) => ({ role, content, attachments })),
     results: convo.results,
     activeTurnId: activeTurnFor(req.params.id) ?? null,
   });
@@ -190,6 +191,26 @@ chatRouter.get('/conversations/:id/export', async (req: Request, res: Response) 
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(buildCsv(convo.results));
+});
+
+// ── GET /api/files/:id ─────────────────────────────────────────────────────
+// Downloads a file the agent produced during a turn
+chatRouter.get('/files/:id', async (req: Request, res: Response) => {
+  const oid = parseId(req.params.id);
+  const file = oid ? await files().findOne({ _id: oid }) : null;
+  if (!file) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+
+  const asciiName = file.name.replace(/[^\w.\- ]/g, '_');
+  res.setHeader('Content-Type', file.mime);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+  );
+  res.send(Buffer.from(file.data.buffer));
 });
 
 // ── Helpers ────────────────────────────────────────────────────────────────
