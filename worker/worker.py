@@ -2,9 +2,9 @@
 worker.py  –  Booth Radar Python worker.
 
 Connects to the Express server over WebSocket and runs chat turns:
-  1. Receives { type: "chat", turnId, messages, results }
+  1. Receives { type: "chat", turnId, conversationId, messages, results }
   2. Runs the Booth Radar agent (Hermes + scraping tools)
-  3. Sends token / status / results / done / error frames back to the server
+  3. Sends token / status / results / file / done / error frames back to the server
 
 The server persists the conversation and relays frames to the browser via SSE.
 """
@@ -24,6 +24,7 @@ load_dotenv()
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+import artifacts
 from agent import run_turn
 
 # ── Logging ────────────────────────────────────────────────────────────────
@@ -46,6 +47,7 @@ _running: set[asyncio.Task[None]] = set()
 async def handle_chat(
     outbox: asyncio.Queue[dict[str, Any]],
     turn_id: str,
+    conversation_id: str | None,
     messages: list[dict[str, str]],
     results: list[dict[str, str]],
 ) -> None:
@@ -57,15 +59,31 @@ async def handle_chat(
             outbox.put_nowait, {"turnId": turn_id, "type": type_, "payload": payload}
         )
 
+    out_dir = artifacts.prepare_dir(conversation_id)
+    before = artifacts.snapshot(out_dir)
+
     try:
-        reply, new_results = await loop.run_in_executor(None, run_turn, messages, results, emit)
+        reply, new_results = await loop.run_in_executor(
+            None, run_turn, messages, results, emit, str(out_dir) if out_dir else None,
+        )
     except Exception as exc:
         log.exception("[worker] turn %s failed", turn_id)
         emit("error", {"message": f"Hermes request failed: {exc}"})
         return
 
+    try:
+        files = await loop.run_in_executor(None, artifacts.collect, out_dir, before, reply)
+    except Exception:
+        log.exception("[worker] collecting files for turn %s failed", turn_id)
+        files = []
+    for f in files:
+        emit("file", f)
+
     emit("done", {"reply": reply, "results": new_results})
-    log.info("[worker] turn %s completed — %d result rows", turn_id, len(new_results))
+    log.info(
+        "[worker] turn %s completed — %d result rows, %d files",
+        turn_id, len(new_results), len(files),
+    )
 
 
 async def _sender(ws, outbox: asyncio.Queue[dict[str, Any]]) -> None:
@@ -103,8 +121,11 @@ async def run() -> None:
                             log.warning("[worker] malformed chat message: %s", msg)
                             continue
                         results = msg.get("results") or []
+                        conversation_id = msg.get("conversationId")
                         log.info("[worker] received chat turn %s (%d messages)", turn_id, len(messages))
-                        task = asyncio.create_task(handle_chat(outbox, turn_id, messages, results))
+                        task = asyncio.create_task(
+                            handle_chat(outbox, turn_id, conversation_id, messages, results)
+                        )
                         _running.add(task)
                         task.add_done_callback(_running.discard)
                 finally:

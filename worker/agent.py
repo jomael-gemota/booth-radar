@@ -188,18 +188,30 @@ def _context_prompt(results: list[Row]) -> str:
     return f"The results table currently has {len(results)} rows (brand | booth):\n{rows}{more}"
 
 
+def _output_prompt(output_dir: str | None) -> str:
+    if not output_dir:
+        return ""
+    return (
+        "\n\nWhen you produce a file for the user (CSV, XLSX, JSON, TXT, MD), save it in\n"
+        f"{output_dir}/ and mention its full path in your reply. Files saved there are\n"
+        "offered to the user as downloads in this chat. Use a descriptive file name."
+    )
+
+
 def run_turn(
     history: list[dict[str, str]],
     results: list[Row],
     emit: Emit,
+    output_dir: str | None = None,
 ) -> tuple[str, list[Row]]:
     """
     Run one assistant turn over *history* (user/assistant messages, last one
     from the user). Returns (reply_text, updated_results).
     """
     results = [dict(r) for r in results]
+    system = f"{SYSTEM_PROMPT}{_output_prompt(output_dir)}\n\n{_context_prompt(results)}"
     convo: list[dict[str, str]] = [
-        {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{_context_prompt(results)}"},
+        {"role": "system", "content": system},
         *({"role": m["role"], "content": m["content"]} for m in history),
     ]
     reply_parts: list[str] = []
