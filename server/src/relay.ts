@@ -11,7 +11,7 @@ export interface BoothEntry {
 }
 
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'thinking';
   content: string;
   at: Date;
 }
@@ -37,6 +37,8 @@ interface Turn {
   events: string[];
   clients: Set<Response>;
   finished: boolean;
+  /** Accumulates thinking chunks in-memory so the full text can be persisted on done. */
+  thinkingBuffer: string;
 }
 
 // How long a finished turn's events stay available for late SSE subscribers
@@ -71,7 +73,7 @@ export function startTurn(
   if (!workerSocket || !isWorkerConnected()) {
     throw new Error('Worker is not connected');
   }
-  turns.set(turnId, { conversationId, events: [], clients: new Set(), finished: false });
+  turns.set(turnId, { conversationId, events: [], clients: new Set(), finished: false, thinkingBuffer: '' });
   activeTurns.set(conversationId.toHexString(), turnId);
   workerSocket.send(JSON.stringify({ type: 'chat', turnId, messages, results }));
 }
@@ -110,16 +112,26 @@ export function subscribe(turnId: string, res: Response): boolean {
 
 async function persist(turn: Turn, type: WorkerEventType, payload: unknown): Promise<void> {
   const col = conversations();
-  if (type === 'results') {
+  if (type === 'thinking') {
+    // Accumulate in-memory only — no DB write per chunk
+    turn.thinkingBuffer += (payload as { text: string }).text;
+  } else if (type === 'results') {
     const { results } = payload as { results: BoothEntry[] };
     await col.updateOne({ _id: turn.conversationId }, { $set: { results, updatedAt: new Date() } });
   } else if (type === 'done') {
     const { reply, results } = payload as { reply: string; results: BoothEntry[] };
+    const now = new Date();
+    // Persist thinking block first (if any), then the assistant reply
+    const newMessages: Pick<ChatMessage, 'role' | 'content' | 'at'>[] = [];
+    if (turn.thinkingBuffer.trim()) {
+      newMessages.push({ role: 'thinking', content: turn.thinkingBuffer, at: now });
+    }
+    newMessages.push({ role: 'assistant', content: reply, at: now });
     await col.updateOne(
       { _id: turn.conversationId },
       {
-        $set: { results, updatedAt: new Date() },
-        $push: { messages: { role: 'assistant', content: reply, at: new Date() } },
+        $set:  { results, updatedAt: now },
+        $push: { messages: { $each: newMessages } } as never,
       },
     );
   }

@@ -24,7 +24,7 @@ interface ConversationSummary {
 
 interface ConversationResponse {
   id: string
-  messages: { role: 'user' | 'assistant'; content: string }[]
+  messages: { role: 'user' | 'assistant' | 'thinking'; content: string }[]
   results: BoothEntry[]
   activeTurnId: string | null
 }
