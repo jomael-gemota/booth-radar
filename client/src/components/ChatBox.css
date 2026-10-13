@@ -405,12 +405,12 @@
   color: var(--text);
 }
 
-/* Assistant bubble — no background, pure text like Claude */
+/* Assistant bubble — no background, pure text; fills available row width */
 .msg-bubble--assistant {
   background: transparent;
   color: var(--text);
   padding: 4px 0;
-  max-width: min(82%, 720px);
+  /* No max-width cap — the wrapper constrains it via flex: 1 */
 }
 
 .msg-bubble a {
@@ -666,7 +666,7 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
-  max-width: min(82%, 720px);
+  flex: 1; /* stretch to fill the full available row width */
 }
 
 .msg-actions {
@@ -674,13 +674,7 @@
   align-items: center;
   gap: 4px;
   padding: 4px 0 2px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-/* Show actions on hover of the whole row */
-.msg-row--assistant:hover .msg-actions {
-  opacity: 1;
+  /* Always visible */
 }
 
 .copy-btn {
