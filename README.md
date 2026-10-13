@@ -126,6 +126,18 @@ For a systemd unit without `User=` (runs as root):
 sudo .venv/bin/playwright install --with-deps chromium
 ```
 
+### File downloads
+
+Files Hermes creates during a turn (CSV, XLSX, JSON, TXT, MD, up to 10 MB, max 5 per
+turn) appear as download chips under the reply. The worker gives each conversation a
+folder at `OUTPUT_ROOT/<conversationId>/`, tells Hermes to save there, and also picks up
+absolute paths mentioned in the reply if they are inside `ARTIFACT_ROOTS`. Hidden files
+and folders (`.ssh`, `.env`, …) are never delivered. Files are stored in the MongoDB
+`files` collection and served at `GET /api/files/:id`.
+
+`OUTPUT_ROOT` must be writable by the user Hermes runs as (the worker creates the
+folders with mode `777`). Do not add folders that contain secrets to `ARTIFACT_ROOTS`.
+
 Try the agent in a terminal without the server:
 
 ```bash
