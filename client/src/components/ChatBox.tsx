@@ -37,43 +37,15 @@ const ACTIVE_CONV_KEY = 'booth-radar:conversationId'
 
 const WELCOME: Message = { id: 'welcome', role: 'assistant', text: '' }
 
-// ── Suggestion cards ──────────────────────────────────────────────────────────
+// ── Greeting helper ───────────────────────────────────────────────────────────
 
-interface SuggestionCard {
-  icon: string
-  title: string
-  hint: string
-  prompt: string
+function getGreeting(): string {
+  const hour = new Date().getHours() // uses the browser's local timezone automatically
+  if (hour >= 5  && hour < 12) return 'Good morning'
+  if (hour >= 12 && hour < 17) return 'Good afternoon'
+  if (hour >= 17 && hour < 21) return 'Good evening'
+  return 'Good night'
 }
-
-const SUGGESTIONS: SuggestionCard[] = [
-  {
-    icon: '🗂️',
-    title: 'Full A–Z directory',
-    hint: 'Collect every exhibitor across all letters',
-    prompt:
-      'Get all exhibitors and booths from https://www.atlanta-apparel.com/exhibitor/Directory, every letter A–Z',
-  },
-  {
-    icon: '🔤',
-    title: 'Partial letter range',
-    hint: 'Quick test run — letters A to C only',
-    prompt:
-      'Just scrape letters A to C from https://www.atlanta-apparel.com/exhibitor/Directory',
-  },
-  {
-    icon: '🌐',
-    title: 'Custom trade-show URL',
-    hint: 'Paste any exhibitor directory link',
-    prompt: 'Get all exhibitors and booths from ',
-  },
-  {
-    icon: '📤',
-    title: 'Export collected data',
-    hint: 'Download current booth results as CSV',
-    prompt: 'Export the collected exhibitor data as a CSV file.',
-  },
-]
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -278,8 +250,8 @@ export default function ChatBox() {
 
   // ── Send message ───────────────────────────────────────────────────────
 
-  async function send(textOverride?: string) {
-    const text = (textOverride ?? input).trim()
+  async function send() {
+    const text = input.trim()
     if (!text || busy) return
 
     addMessage({ id: genId(), role: 'user', text })
@@ -353,18 +325,6 @@ export default function ChatBox() {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
       void send()
-    }
-  }
-
-  /** Called when the user clicks a suggestion card */
-  function handleSuggestion(prompt: string) {
-    // Prompts ending with a space need editing (e.g. "…from ") — just fill.
-    // Complete prompts auto-send immediately.
-    if (prompt.endsWith(' ')) {
-      setInput(prompt)
-      inputRef.current?.focus()
-    } else {
-      void send(prompt)
     }
   }
 
@@ -478,7 +438,7 @@ export default function ChatBox() {
           )}
 
           {isWelcomeState ? (
-            <WelcomeScreen onSuggestion={handleSuggestion} />
+            <WelcomeScreen />
           ) : (
             displayMessages.map((msg) => (
               <MessageBubble key={msg.id} msg={msg} />
@@ -532,32 +492,18 @@ export default function ChatBox() {
 
 // ── WelcomeScreen ────────────────────────────────────────────────────────────
 
-function WelcomeScreen({ onSuggestion }: { onSuggestion: (prompt: string) => void }) {
+function WelcomeScreen() {
+  const greeting = getGreeting()
   return (
     <div className="welcome-screen">
-      <div className="welcome-hero">
-        <div className="welcome-icon" aria-hidden>📡</div>
-        <h2 className="welcome-heading">What would you like to scrape?</h2>
-        <p className="welcome-sub">
-          Point me at a trade-show exhibitor directory and I'll collect brands and
-          booth numbers into a table you can export as CSV.
-        </p>
-      </div>
-
-      <div className="suggestion-grid">
-        {SUGGESTIONS.map((s) => (
-          <button
-            key={s.title}
-            className="suggestion-card"
-            type="button"
-            onClick={() => onSuggestion(s.prompt)}
-          >
-            <span className="suggestion-icon" aria-hidden>{s.icon}</span>
-            <span className="suggestion-title">{s.title}</span>
-            <span className="suggestion-hint">{s.hint}</span>
-          </button>
-        ))}
-      </div>
+      <div className="welcome-icon" aria-hidden>📡</div>
+      <h2 className="welcome-heading">
+        {greeting}! I'm Booth Radar.
+      </h2>
+      <p className="welcome-sub">
+        Point me at a trade-show exhibitor directory and I'll collect brands and
+        booth numbers into a table you can export as CSV.
+      </p>
     </div>
   )
 }
