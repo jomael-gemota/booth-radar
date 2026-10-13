@@ -707,6 +707,23 @@
   letter-spacing: 0.01em;
 }
 
+/* Subtle separator between action buttons */
+.msg-actions .copy-btn + .copy-btn {
+  position: relative;
+  margin-left: 2px;
+}
+
+.msg-actions .copy-btn + .copy-btn::before {
+  content: '';
+  position: absolute;
+  left: -3px;
+  top: 20%;
+  height: 60%;
+  width: 1px;
+  background: var(--border);
+  border-radius: 1px;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    RESULTS TABLE
    ══════════════════════════════════════════════════════════════════════════ */

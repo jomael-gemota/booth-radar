@@ -538,7 +538,12 @@ export default function ChatBox() {
               )}
 
               {displayMessages.map((msg) => (
-                <MessageBubble key={msg.id} msg={msg} />
+                <MessageBubble
+                  key={msg.id}
+                  msg={msg}
+                  conversationId={conversationId ?? undefined}
+                  hasResults={results.length > 0}
+                />
               ))}
 
               {showTyping && <TypingIndicator />}
@@ -657,7 +662,13 @@ function WelcomeScreen() {
 
 // ── MessageBubble ────────────────────────────────────────────────────────────
 
-function MessageBubble({ msg }: { msg: Message }) {
+interface MessageBubbleProps {
+  msg: Message
+  conversationId?: string
+  hasResults?: boolean
+}
+
+function MessageBubble({ msg, conversationId, hasResults }: MessageBubbleProps) {
   if (msg.role === 'thinking') {
     return <ThinkingBubble text={msg.text} streaming={msg.streaming} />
   }
@@ -698,6 +709,9 @@ function MessageBubble({ msg }: { msg: Message }) {
         {!msg.streaming && msg.text.trim() && (
           <div className="msg-actions">
             <CopyButton text={msg.text} />
+            {conversationId && hasResults && (
+              <ExportCsvButton conversationId={conversationId} />
+            )}
           </div>
         )}
       </div>
@@ -828,6 +842,48 @@ function ResultsTable({ results }: { results: BoothEntry[] }) {
         </tbody>
       </table>
     </div>
+  )
+}
+
+// ── ExportCsvButton ───────────────────────────────────────────────────────────
+
+function ExportCsvButton({ conversationId }: { conversationId: string }) {
+  const [state, setState] = useState<'idle' | 'loading' | 'done'>('idle')
+
+  async function handleExport() {
+    if (state === 'loading') return
+    setState('loading')
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}/export`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const blob = await res.blob()
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href     = url
+      a.download = `booth-radar-${conversationId}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+      setState('done')
+      setTimeout(() => setState('idle'), 2000)
+    } catch (err) {
+      console.error('export failed', err)
+      setState('idle')
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className={`copy-btn${state === 'done' ? ' copy-btn--copied' : ''}`}
+      onClick={handleExport}
+      disabled={state === 'loading'}
+      title={state === 'loading' ? 'Exporting…' : 'Export results to CSV'}
+    >
+      {state === 'done' ? <CheckIcon /> : <DownloadIcon />}
+      <span className="copy-btn-label">
+        {state === 'loading' ? 'Exporting…' : state === 'done' ? 'Exported' : 'Export CSV'}
+      </span>
+    </button>
   )
 }
 
@@ -979,6 +1035,17 @@ function ChevronDownIcon() {
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
       strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="6 9 12 15 18 9" />
+    </svg>
+  )
+}
+
+function DownloadIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
     </svg>
   )
 }
