@@ -37,14 +37,15 @@ const ACTIVE_CONV_KEY = 'booth-radar:conversationId'
 
 const WELCOME: Message = { id: 'welcome', role: 'assistant', text: '' }
 
-// ── Greeting helper ───────────────────────────────────────────────────────────
+// ── Greeting helpers ──────────────────────────────────────────────────────────
 
-function getGreeting(): string {
-  const hour = new Date().getHours() // uses the browser's local timezone automatically
-  if (hour >= 5  && hour < 12) return 'Good morning'
-  if (hour >= 12 && hour < 17) return 'Good afternoon'
-  if (hour >= 17 && hour < 21) return 'Good evening'
-  return 'Good night'
+/** Immediate client-side fallback — used only if the API call fails */
+function getStaticGreeting(): { greeting: string; subtext: string } {
+  const hour = new Date().getHours()
+  if (hour >= 5  && hour < 12) return { greeting: "Good morning! I'm Booth Radar.", subtext: "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you." }
+  if (hour >= 12 && hour < 17) return { greeting: "Good afternoon! I'm Booth Radar.", subtext: "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you." }
+  if (hour >= 17 && hour < 21) return { greeting: "Good evening! I'm Booth Radar.", subtext: "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you." }
+  return { greeting: "Good night! I'm Booth Radar.", subtext: "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you." }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -493,17 +494,43 @@ export default function ChatBox() {
 // ── WelcomeScreen ────────────────────────────────────────────────────────────
 
 function WelcomeScreen() {
-  const greeting = getGreeting()
+  const [content, setContent]   = useState<{ greeting: string; subtext: string } | null>(null)
+  const [visible, setVisible]   = useState(false)
+
+  useEffect(() => {
+    const hour = new Date().getHours()
+    fetch(`/api/greeting?hour=${hour}`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json() as Promise<{ greeting: string; subtext: string }>
+      })
+      .then((data) => {
+        setContent(data)
+      })
+      .catch(() => {
+        // Server unreachable or key missing — use client-side fallback
+        setContent(getStaticGreeting())
+      })
+  }, [])
+
+  // Tiny delay before fading in so the transition is always visible
+  useEffect(() => {
+    if (!content) return
+    const t = setTimeout(() => setVisible(true), 40)
+    return () => clearTimeout(t)
+  }, [content])
+
   return (
     <div className="welcome-screen">
       <div className="welcome-icon" aria-hidden>📡</div>
-      <h2 className="welcome-heading">
-        {greeting}! I'm Booth Radar.
-      </h2>
-      <p className="welcome-sub">
-        Point me at a trade-show exhibitor directory and I'll collect brands and
-        booth numbers into a table you can export as CSV.
-      </p>
+      <div className={`welcome-text${visible ? ' welcome-text--visible' : ''}`}>
+        <h2 className="welcome-heading">
+          {content?.greeting ?? ''}
+        </h2>
+        <p className="welcome-sub">
+          {content?.subtext ?? ''}
+        </p>
+      </div>
     </div>
   )
 }

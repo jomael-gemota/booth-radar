@@ -789,6 +789,22 @@
   50%       { transform: translateY(-8px); }
 }
 
+/* Text block — hidden until the API response arrives, then fades in */
+.welcome-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.45s ease, transform 0.45s ease;
+}
+
+.welcome-text--visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .welcome-heading {
   font-size: 1.65rem;
   font-weight: 650;
