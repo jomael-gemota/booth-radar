@@ -1,4 +1,4 @@
-import { MongoClient, Db } from 'mongodb';
+import { MongoClient, Db, Collection } from 'mongodb';
 
 const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017';
 const MONGODB_DB  = process.env.MONGODB_DB  ?? 'booth-radar';
@@ -17,4 +17,18 @@ export async function connectDb(): Promise<Db> {
 export function getDb(): Db {
   if (!db) throw new Error('DB not initialised — call connectDb() first');
   return db;
+}
+
+// ── User profiles ──────────────────────────────────────────────────────────
+
+export interface UserProfile {
+  _id: string;           // Google user ID
+  nickname?: string;
+  jobTitle?: string;
+  department?: string;
+  updatedAt: Date;
+}
+
+export function getUserProfiles(): Collection<UserProfile> {
+  return getDb().collection<UserProfile>('userProfiles');
 }
