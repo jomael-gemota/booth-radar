@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStream, type Attachment, type BoothEntry } from '../hooks/useStream'
 import { logout, type AuthUser } from '../hooks/useAuth'
+import AccountModal from './AccountModal'
 import ExportButton from './ExportButton'
 import './ChatBox.css'
 
@@ -31,10 +32,10 @@ interface ConversationResponse {
   activeTurnId: string | null
 }
 
-// ── Storage keys ────────────────────────────────────────────────────────────
+// ── Storage keys (scoped per user to isolate data across accounts) ──────────
 
-const CONV_LIST_KEY   = 'booth-radar:conversations'
-const ACTIVE_CONV_KEY = 'booth-radar:conversationId'
+function convListKey(userId: string)   { return `booth-radar:conversations:${userId}` }
+function activeConvKey(userId: string) { return `booth-radar:conversationId:${userId}` }
 
 // ── Welcome sentinel (used as array marker — never rendered as a bubble) ─────
 
@@ -61,16 +62,16 @@ function truncate(s: string, n: number) {
   return s.length > n ? s.slice(0, n) + '…' : s
 }
 
-function getConversations(): ConversationSummary[] {
+function getConversations(userId: string): ConversationSummary[] {
   try {
-    return JSON.parse(localStorage.getItem(CONV_LIST_KEY) ?? '[]')
+    return JSON.parse(localStorage.getItem(convListKey(userId)) ?? '[]')
   } catch {
     return []
   }
 }
 
-function saveConversations(list: ConversationSummary[]) {
-  localStorage.setItem(CONV_LIST_KEY, JSON.stringify(list))
+function saveConversations(userId: string, list: ConversationSummary[]) {
+  localStorage.setItem(convListKey(userId), JSON.stringify(list))
 }
 
 function groupByDate(convs: ConversationSummary[]) {
@@ -98,14 +99,20 @@ function groupByDate(convs: ConversationSummary[]) {
 
 export default function ChatBox({ user }: { user: AuthUser }) {
   // Sidebar
-  const [conversations, setConversations] = useState<ConversationSummary[]>(getConversations)
+  const [conversations, setConversations] = useState<ConversationSummary[]>(() => getConversations(user.id))
   const [sidebarOpen, setSidebarOpen]     = useState(true)
+
+  // Profile dropdown + account modal
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false)
+  const [accountModalOpen, setAccountModalOpen] = useState(false)
+  const [nickname, setNickname] = useState<string | null>(null)
+  const profileMenuRef = useRef<HTMLDivElement>(null)
 
   // Active conversation
   const [messages,        setMessages]        = useState<Message[]>([WELCOME])
   const [input,           setInput]           = useState('')
   const [conversationId,  setConversationId]  = useState<string | null>(
-    () => localStorage.getItem(ACTIVE_CONV_KEY),
+    () => localStorage.getItem(activeConvKey(user.id)),
   )
   const [turnId,   setTurnId]   = useState<string | null>(null)
   const [results,  setResults]  = useState<BoothEntry[]>([])
@@ -154,13 +161,61 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       .catch(() => {})
   }, [addMessage])
 
+  // ── Fetch nickname from profile ────────────────────────────────────────
+
+  useEffect(() => {
+    fetch('/api/me', { credentials: 'include' })
+      .then((r) => r.json() as Promise<{ nickname: string | null }>)
+      .then((d) => { if (d.nickname) setNickname(d.nickname) })
+      .catch(() => {})
+  }, [])
+
+  // ── Sync conversation list from server ────────────────────────────────
+
+  useEffect(() => {
+    fetch('/api/conversations', { credentials: 'include' })
+      .then((r) => r.json() as Promise<{ conversations: Array<{ id: string; title: string; preview: string; createdAt: number }> }>)
+      .then(({ conversations: serverList }) => {
+        if (!serverList.length) return
+        // Merge: server is authoritative for existence/title/preview/createdAt;
+        // localStorage preserves the pinned flag
+        setConversations((prev) => {
+          const pinnedById = new Map(prev.map((c) => [c.id, c.pinned ?? false]))
+          const merged = serverList.map((s) => ({
+            id:        s.id,
+            title:     s.title || s.preview.split(' ').slice(0, 5).join(' ') || 'Untitled',
+            preview:   s.preview,
+            createdAt: s.createdAt,
+            pinned:    pinnedById.get(s.id) ?? false,
+          }))
+          saveConversations(user.id, merged)
+          return merged
+        })
+      })
+      .catch(() => {})
+  }, [user.id])
+
+  // ── Close profile menu when clicking outside ───────────────────────────
+
+  useEffect(() => {
+    if (!profileMenuOpen) return
+    function handleClick(e: MouseEvent) {
+      if (profileMenuRef.current && !profileMenuRef.current.contains(e.target as Node)) {
+        setProfileMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [profileMenuOpen])
+
   // ── Restore active conversation on mount ───────────────────────────────
 
   useEffect(() => {
-    const saved = localStorage.getItem(ACTIVE_CONV_KEY)
+    const saved = localStorage.getItem(activeConvKey(user.id))
     if (!saved) return
     void loadConversation(saved, true)
-  }, []) // loadConversation is stable — only runs once on mount
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // intentionally runs once on mount — loadConversation is stable, user.id is immutable
 
   // ── Auto-scroll ────────────────────────────────────────────────────────
 
@@ -190,14 +245,14 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       setResults(c.results)
       setConversationId(id)
       conversationIdRef.current = id
-      localStorage.setItem(ACTIVE_CONV_KEY, id)
+      localStorage.setItem(activeConvKey(user.id), id)
       if (c.activeTurnId) {
         setBusy(true)
         setTurnId(c.activeTurnId)
       }
     } catch {
       if (onMount) {
-        localStorage.removeItem(ACTIVE_CONV_KEY)
+        localStorage.removeItem(activeConvKey(user.id))
         setConversationId(null)
       }
     } finally {
@@ -215,7 +270,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       if (!title) return
       setConversations((prev) => {
         const updated = prev.map((c) => (c.id === convId ? { ...c, title } : c))
-        saveConversations(updated)
+        saveConversations(user.id, updated)
         return updated
       })
     } catch {
@@ -339,7 +394,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
 
       setConversationId(body.conversationId)
       conversationIdRef.current = body.conversationId
-      localStorage.setItem(ACTIVE_CONV_KEY, body.conversationId)
+      localStorage.setItem(activeConvKey(user.id), body.conversationId)
       setTurnId(body.turnId)
 
       // Track in sidebar — add if it's a brand-new conversation
@@ -353,7 +408,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
         }
         const updated = [summary, ...conversations]
         setConversations(updated)
-        saveConversations(updated)
+        saveConversations(user.id, updated)
       }
     } catch (err) {
       setBusy(false)
@@ -362,7 +417,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   }
 
   function newChat() {
-    localStorage.removeItem(ACTIVE_CONV_KEY)
+    localStorage.removeItem(activeConvKey(user.id))
     streamingMsgId.current = null
     thinkingMsgId.current  = null
     setConversationId(null)
@@ -379,7 +434,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     e.stopPropagation()
     const updated = conversations.filter((c) => c.id !== id)
     setConversations(updated)
-    saveConversations(updated)
+    saveConversations(user.id, updated)
     if (conversationId === id) newChat()
   }
 
@@ -389,7 +444,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       c.id === id ? { ...c, pinned: !c.pinned } : c,
     )
     setConversations(updated)
-    saveConversations(updated)
+    saveConversations(user.id, updated)
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -518,36 +573,73 @@ export default function ChatBox({ user }: { user: AuthUser }) {
         )}
 
         {/* ── User profile (bottom of sidebar) ────────────────────── */}
-        <div className={`sidebar-user${sidebarOpen ? '' : ' sidebar-user--collapsed'}`}>
-          {user.picture ? (
-            <img
-              className="sidebar-user-avatar"
-              src={user.picture}
-              alt={user.name}
-              referrerPolicy="no-referrer"
-            />
-          ) : (
-            <div className="sidebar-user-avatar sidebar-user-avatar--fallback">
-              {user.name.charAt(0).toUpperCase()}
+        <div className="sidebar-user-wrap" ref={profileMenuRef}>
+
+          {/* Profile menu popover (above the profile strip) */}
+          {profileMenuOpen && (
+            <div className="sidebar-profile-menu">
+              <button
+                className="sidebar-profile-menu-item"
+                onClick={() => { setProfileMenuOpen(false); setAccountModalOpen(true) }}
+              >
+                <AccountIcon /> My Account
+              </button>
+              <div className="sidebar-profile-menu-divider" />
+              <button
+                className="sidebar-profile-menu-item sidebar-profile-menu-item--danger"
+                onClick={() => void logout()}
+              >
+                <SignOutIcon /> Sign out
+              </button>
             </div>
           )}
-          {sidebarOpen && (
-            <div className="sidebar-user-info">
-              <span className="sidebar-user-name">{user.name}</span>
-              <span className="sidebar-user-email">{user.email}</span>
-            </div>
-          )}
-          {sidebarOpen && (
-            <button
-              className="sidebar-user-logout"
-              onClick={() => void logout()}
-              title="Sign out"
-            >
-              <SignOutIcon />
-            </button>
-          )}
+
+          <button
+            className={`sidebar-user${sidebarOpen ? '' : ' sidebar-user--collapsed'}`}
+            onClick={() => setProfileMenuOpen((o) => !o)}
+            title={sidebarOpen ? 'Account options' : (nickname ?? user.name)}
+          >
+            {user.picture ? (
+              <img
+                className="sidebar-user-avatar"
+                src={user.picture}
+                alt={nickname ?? user.name}
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="sidebar-user-avatar sidebar-user-avatar--fallback">
+                {(nickname ?? user.name).charAt(0).toUpperCase()}
+              </div>
+            )}
+            {sidebarOpen && (
+              <div className="sidebar-user-info">
+                <span className="sidebar-user-name">{nickname ?? user.name}</span>
+                <span className="sidebar-user-email">{user.email}</span>
+              </div>
+            )}
+            {sidebarOpen && (
+              <span className="sidebar-user-chevron" aria-hidden>
+                <ChevronDownIcon />
+              </span>
+            )}
+          </button>
         </div>
       </aside>
+
+      {/* ── Account modal ───────────────────────────────────────────────── */}
+      {accountModalOpen && (
+        <AccountModal
+          user={user}
+          onClose={() => {
+            setAccountModalOpen(false)
+            // Refresh nickname from server after potential update
+            fetch('/api/me', { credentials: 'include' })
+              .then((r) => r.json() as Promise<{ nickname: string | null }>)
+              .then((d) => setNickname(d.nickname ?? null))
+              .catch(() => {})
+          }}
+        />
+      )}
 
       {/* ── Main panel ──────────────────────────────────────────────── */}
       <main className="main-panel">
@@ -1132,6 +1224,16 @@ function SignOutIcon() {
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
       <polyline points="16 17 21 12 16 7" />
       <line x1="21" y1="12" x2="9" y2="12" />
+    </svg>
+  )
+}
+
+function AccountIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
     </svg>
   )
 }

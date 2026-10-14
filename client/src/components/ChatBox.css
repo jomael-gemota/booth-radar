@@ -135,6 +135,7 @@
 .conv-list {
   flex: 1;
   overflow-y: auto;
+  min-height: 0;
   padding: 4px 6px 8px;
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
@@ -1088,15 +1089,30 @@
    SIDEBAR USER PROFILE
    ══════════════════════════════════════════════════════════════════════════ */
 
+.sidebar-user-wrap {
+  position: relative;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* Profile strip — now a <button> */
 .sidebar-user {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   padding: 0.75rem 0.75rem 0.9rem;
-  border-top: 1px solid var(--border);
-  margin-top: auto;
-  flex-shrink: 0;
-  min-width: 0;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.sidebar-user:hover {
+  background: var(--surface-hover);
 }
 
 .sidebar-user--collapsed {
@@ -1149,23 +1165,60 @@
   text-overflow: ellipsis;
 }
 
-.sidebar-user-logout {
+.sidebar-user-chevron {
   flex-shrink: 0;
+  color: var(--text-faint);
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  border: none;
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s;
 }
 
-.sidebar-user-logout:hover {
+/* ── Profile popover menu ─────────────────────────────────────────────── */
+
+.sidebar-profile-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 8px;
+  right: 8px;
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+  z-index: 100;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.sidebar-profile-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s;
+  text-align: left;
+}
+
+.sidebar-profile-menu-item:hover {
+  background: var(--border);
+}
+
+.sidebar-profile-menu-item--danger {
   color: var(--error);
+}
+
+.sidebar-profile-menu-item--danger:hover {
   background: rgba(255, 107, 107, 0.1);
+}
+
+.sidebar-profile-menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
 }
 
