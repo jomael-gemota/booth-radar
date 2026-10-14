@@ -44,12 +44,14 @@ const WELCOME: Message = { id: 'welcome', role: 'assistant', text: '' }
 // ── Greeting helpers ──────────────────────────────────────────────────────────
 
 /** Immediate client-side fallback — used only if the API call fails */
-function getStaticGreeting(): { greeting: string; subtext: string } {
-  const hour = new Date().getHours()
-  if (hour >= 5  && hour < 12) return { greeting: "Good morning! I'm Booth Radar.", subtext: "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you." }
-  if (hour >= 12 && hour < 17) return { greeting: "Good afternoon! I'm Booth Radar.", subtext: "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you." }
-  if (hour >= 17 && hour < 21) return { greeting: "Good evening! I'm Booth Radar.", subtext: "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you." }
-  return { greeting: "Good night! I'm Booth Radar.", subtext: "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you." }
+function getStaticGreeting(name?: string): { greeting: string; subtext: string } {
+  const hour   = new Date().getHours()
+  const suffix = name ? `, ${name}` : ''
+  const sub    = "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you."
+  if (hour >= 5  && hour < 12) return { greeting: `Good morning${suffix}! I'm Booth Radar.`, subtext: sub }
+  if (hour >= 12 && hour < 17) return { greeting: `Good afternoon${suffix}! I'm Booth Radar.`, subtext: sub }
+  if (hour >= 17 && hour < 21) return { greeting: `Good evening${suffix}! I'm Booth Radar.`, subtext: sub }
+  return { greeting: `Good night${suffix}! I'm Booth Radar.`, subtext: sub }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -246,6 +248,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       setConversationId(id)
       conversationIdRef.current = id
       localStorage.setItem(activeConvKey(user.id), id)
+      setView('chat')
       if (c.activeTurnId) {
         setBusy(true)
         setTurnId(c.activeTurnId)
@@ -427,6 +430,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     setResults([])
     setMessages([WELCOME])
     setInput('')
+    setView('chat')
     inputRef.current?.focus()
   }
 
@@ -635,8 +639,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
           <AccountPage
             user={user}
             onBack={() => setView('chat')}
-            onNicknameChange={(name) => setNickname(name)}
-          />
+            onNicknameChange={(name) => setNickname(name)}          />
 
         ) : (
           /* ── Chat view ────────────────────────────────────────────── */
@@ -663,7 +666,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
             {isWelcomeState ? (
               /* ── Welcome / centered-input layout ─────────────────────── */
               <div className="welcome-center">
-                <WelcomeScreen />
+                <WelcomeScreen name={nickname ?? user.name} />
                 <div className="input-area input-area--welcome">
                   {renderInputForm()}
                 </div>
@@ -764,24 +767,24 @@ function ConvItem({ conv, active, onSelect, onPin, onDelete }: ConvItemProps) {
 
 // ── WelcomeScreen ────────────────────────────────────────────────────────────
 
-function WelcomeScreen() {
+function WelcomeScreen({ name }: { name: string }) {
   const [content, setContent]   = useState<{ greeting: string; subtext: string } | null>(null)
   const [visible, setVisible]   = useState(false)
 
   useEffect(() => {
+    setContent(null)
+    setVisible(false)
     const hour = new Date().getHours()
-    fetch(`/api/greeting?hour=${hour}`)
+    const params = new URLSearchParams({ hour: String(hour) })
+    if (name) params.set('name', name)
+    fetch(`/api/greeting?${params}`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.json() as Promise<{ greeting: string; subtext: string }>
       })
-      .then((data) => {
-        setContent(data)
-      })
-      .catch(() => {
-        setContent(getStaticGreeting())
-      })
-  }, [])
+      .then((data) => { setContent(data) })
+      .catch(() => { setContent(getStaticGreeting(name)) })
+  }, [name])
 
   useEffect(() => {
     if (!content) return
