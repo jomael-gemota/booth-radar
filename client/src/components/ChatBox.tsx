@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStream, type Attachment, type BoothEntry } from '../hooks/useStream'
 import { logout, type AuthUser } from '../hooks/useAuth'
-import AccountModal from './AccountModal'
+import AccountPage from './AccountPage'
 import ExportButton from './ExportButton'
 import './ChatBox.css'
 
@@ -102,9 +102,9 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   const [conversations, setConversations] = useState<ConversationSummary[]>(() => getConversations(user.id))
   const [sidebarOpen, setSidebarOpen]     = useState(true)
 
-  // Profile dropdown + account modal
+  // Profile dropdown + account page
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
-  const [accountModalOpen, setAccountModalOpen] = useState(false)
+  const [view, setView] = useState<'chat' | 'account'>('chat')
   const [nickname, setNickname] = useState<string | null>(null)
   const profileMenuRef = useRef<HTMLDivElement>(null)
 
@@ -580,7 +580,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
             <div className="sidebar-profile-menu">
               <button
                 className="sidebar-profile-menu-item"
-                onClick={() => { setProfileMenuOpen(false); setAccountModalOpen(true) }}
+                onClick={() => { setProfileMenuOpen(false); setView('account') }}
               >
                 <AccountIcon /> My Account
               </button>
@@ -626,89 +626,88 @@ export default function ChatBox({ user }: { user: AuthUser }) {
         </div>
       </aside>
 
-      {/* ── Account modal ───────────────────────────────────────────────── */}
-      {accountModalOpen && (
-        <AccountModal
-          user={user}
-          onClose={() => {
-            setAccountModalOpen(false)
-            // Refresh nickname from server after potential update
-            fetch('/api/me', { credentials: 'include' })
-              .then((r) => r.json() as Promise<{ nickname: string | null }>)
-              .then((d) => setNickname(d.nickname ?? null))
-              .catch(() => {})
-          }}
-        />
-      )}
-
       {/* ── Main panel ──────────────────────────────────────────────── */}
       <main className="main-panel">
 
-        {/* Header */}
-        <header className="chat-header">
-          {!sidebarOpen && (
-            <button
-              className="sidebar-open-btn"
-              onClick={() => setSidebarOpen(true)}
-              title="Open sidebar"
-            >
-              <MenuIcon />
-            </button>
-          )}
-          <h1 className="chat-header-title">{activeTitle}</h1>
-          {results.length > 0 && (
-            <span className="chat-header-badge">
-              {results.length} row{results.length !== 1 ? 's' : ''}
-            </span>
-          )}
-        </header>
+        {view === 'account' ? (
 
-        {isWelcomeState ? (
-          /* ── Welcome / centered-input layout ─────────────────────── */
-          <div className="welcome-center">
-            <WelcomeScreen />
-            <div className="input-area input-area--welcome">
-              {renderInputForm()}
-            </div>
-          </div>
+          /* ── Account settings page ────────────────────────────────── */
+          <AccountPage
+            user={user}
+            onBack={() => setView('chat')}
+            onNicknameChange={(name) => setNickname(name)}
+          />
+
         ) : (
-          /* ── Normal chat layout ───────────────────────────────────── */
+          /* ── Chat view ────────────────────────────────────────────── */
           <>
-            <div className="chat-messages">
-              {loadingConv && (
-                <div className="conv-loading">
-                  <span className="spinner spinner--sm" />
-                  Loading conversation…
-                </div>
+            {/* Header */}
+            <header className="chat-header">
+              {!sidebarOpen && (
+                <button
+                  className="sidebar-open-btn"
+                  onClick={() => setSidebarOpen(true)}
+                  title="Open sidebar"
+                >
+                  <MenuIcon />
+                </button>
               )}
-
-              {displayMessages.map((msg) => (
-                <MessageBubble
-                  key={msg.id}
-                  msg={msg}
-                  conversationId={conversationId ?? undefined}
-                  hasResults={results.length > 0}
-                />
-              ))}
-
-              {showTyping && <TypingIndicator />}
-
-              {results.length > 0 && conversationId && (
-                <div className="results-block">
-                  <p className="results-label">
-                    📊 {results.length} exhibitor{results.length !== 1 ? 's' : ''} collected
-                  </p>
-                  <ResultsTable results={results} />
-                  <ExportButton conversationId={conversationId} />
-                </div>
+              <h1 className="chat-header-title">{activeTitle}</h1>
+              {results.length > 0 && (
+                <span className="chat-header-badge">
+                  {results.length} row{results.length !== 1 ? 's' : ''}
+                </span>
               )}
+            </header>
 
-              <div ref={bottomRef} />
-            </div>
+            {isWelcomeState ? (
+              /* ── Welcome / centered-input layout ─────────────────────── */
+              <div className="welcome-center">
+                <WelcomeScreen />
+                <div className="input-area input-area--welcome">
+                  {renderInputForm()}
+                </div>
+              </div>
+            ) : (
+              /* ── Normal chat layout ───────────────────────────────────── */
+              <>
+                <div className="chat-messages">
+                  {loadingConv && (
+                    <div className="conv-loading">
+                      <span className="spinner spinner--sm" />
+                      Loading conversation…
+                    </div>
+                  )}
 
-            <div className="input-area">
-              {renderInputForm()}
-            </div>
+                  {displayMessages.map((msg) => (
+                    <MessageBubble
+                      key={msg.id}
+                      msg={msg}
+                      conversationId={conversationId ?? undefined}
+                      hasResults={results.length > 0}
+                    />
+                  ))}
+
+                  {showTyping && <TypingIndicator />}
+
+                  {results.length > 0 && conversationId && (
+                    <div className="results-block">
+                      <p className="results-label">
+                        📊 {results.length} exhibitor{results.length !== 1 ? 's' : ''} collected
+                      </p>
+                      <ResultsTable results={results} />
+                      <ExportButton conversationId={conversationId} />
+                    </div>
+                  )}
+
+                  <div ref={bottomRef} />
+                </div>
+
+                <div className="input-area">
+                  {renderInputForm()}
+                </div>
+              </>
+            )}
           </>
         )}
 

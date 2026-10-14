@@ -1,0 +1,268 @@
+/* ── Shell ────────────────────────────────────────────────────────────── */
+
+.ap-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
+  background: var(--main-bg);
+}
+
+/* ── Header ───────────────────────────────────────────────────────────── */
+
+.ap-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  background: var(--main-bg);
+  z-index: 1;
+}
+
+.ap-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.ap-back:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.ap-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* ── Body ─────────────────────────────────────────────────────────────── */
+
+.ap-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: 2rem 1.5rem;
+  max-width: 640px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* ── Section ──────────────────────────────────────────────────────────── */
+
+.ap-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.ap-section-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.ap-section-desc {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: -0.5rem;
+}
+
+/* ── Identity card ────────────────────────────────────────────────────── */
+
+.ap-identity-card {
+  flex-direction: row;
+  align-items: center;
+  gap: 1.2rem;
+}
+
+.ap-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  object-fit: cover;
+}
+
+.ap-avatar--fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 1.4rem;
+  font-weight: 700;
+  border: 1px solid var(--accent);
+  user-select: none;
+}
+
+.ap-identity-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.ap-identity-name {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ap-identity-email {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ap-identity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.25rem;
+  font-size: 0.7rem;
+  color: var(--text-faint);
+}
+
+/* ── Loader ───────────────────────────────────────────────────────────── */
+
+.ap-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 0;
+}
+
+/* ── Form ─────────────────────────────────────────────────────────────── */
+
+.ap-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* Two-column row on wider viewports */
+.ap-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 520px) {
+  .ap-row { grid-template-columns: 1fr; }
+}
+
+.ap-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ap-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ap-field-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: -0.1rem;
+}
+
+.ap-input {
+  background: var(--main-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-family: inherit;
+  padding: 0.6rem 0.8rem;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  width: 100%;
+}
+
+.ap-input::placeholder {
+  color: var(--text-faint);
+}
+
+.ap-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.ap-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ── Error ────────────────────────────────────────────────────────────── */
+
+.ap-error {
+  font-size: 0.78rem;
+  color: var(--error);
+  padding: 0.5rem 0.75rem;
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid rgba(255, 107, 107, 0.3);
+  border-radius: var(--radius-sm);
+}
+
+/* ── Actions ──────────────────────────────────────────────────────────── */
+
+.ap-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 0.25rem;
+}
+
+.ap-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.6rem 1.4rem;
+  border-radius: var(--radius-sm);
+  border: none;
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.ap-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.ap-btn--save {
+  background: var(--accent);
+  color: #fff;
+}
+
+.ap-btn--save:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
