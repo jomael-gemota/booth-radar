@@ -955,11 +955,6 @@
   text-align: center;
 }
 
-.chat-input:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 /* Send button — anchored to bottom-right as textarea grows */
 .send-btn {
   display: flex;
