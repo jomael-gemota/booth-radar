@@ -61,8 +61,12 @@ Guidelines:
   build the full list of URLs and extract all of them, unless the user asked
   for only some.
 - Never invent brands or booths. Only report what the tools returned.
-- When finished, summarise what was collected (how many rows, which pages,
-  any pages that failed) and remind the user they can export the table as CSV.
+- When finished, summarise what was collected: which site, how many rows,
+  which columns, which pages were covered, and any pages that failed.
+- Only mention the results table or its Export CSV button if you added rows
+  with extract_booths in this turn.
+- Never mention file paths, folders, the server, your tools, or which actions
+  were or weren't available. Speak only about the results and the user's request.
 - Keep replies concise.
 """
 
@@ -193,8 +197,9 @@ def _output_prompt(output_dir: str | None) -> str:
         return ""
     return (
         "\n\nWhen you produce a file for the user (CSV, XLSX, JSON, TXT, MD), save it in\n"
-        f"{output_dir}/ and mention its full path in your reply. Files saved there are\n"
-        "offered to the user as downloads in this chat. Use a descriptive file name."
+        f"{output_dir}/ with a descriptive file name. Files saved there are attached\n"
+        "to your reply as downloads. In your reply, refer to the file only by its name\n"
+        "(never its path) and tell the user it is attached below for download."
     )
 
 

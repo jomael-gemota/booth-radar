@@ -14,7 +14,7 @@ import mimetypes
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +34,38 @@ _PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Absolute local file paths (/a/b/name.ext, ~/a/name.ext). The lookbehind skips URLs.
+_LOCAL_FILE_RE = re.compile(
+    r"(?<![\w:/.~])~?/(?:[^\s/`'\"<>|()\[\]]+/)+([^\s/`'\"<>|()\[\]]+\.[A-Za-z0-9]{1,5})\b"
+)
+
 Snapshot = dict[str, tuple[float, int]]
+
+
+def hide_paths(text: str) -> str:
+    """Replace local file paths with their file name; users download files from the chat."""
+    return _LOCAL_FILE_RE.sub(r"\1", text)
+
+
+class PathScrubber:
+    """Apply hide_paths to streamed text, holding back the trailing partial word."""
+
+    def __init__(self, forward: Callable[[str], None]) -> None:
+        self._forward = forward
+        self._buffer = ""
+
+    def feed(self, chunk: str) -> None:
+        self._buffer += chunk
+        cut = max(self._buffer.rfind(c) for c in " \t\r\n")
+        if cut == -1:
+            return
+        ready, self._buffer = self._buffer[: cut + 1], self._buffer[cut + 1:]
+        self._forward(hide_paths(ready))
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._forward(hide_paths(self._buffer))
+        self._buffer = ""
 
 
 def prepare_dir(conversation_id: str | None) -> Path | None:
