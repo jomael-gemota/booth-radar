@@ -1,6 +1,10 @@
 import { Router, Request, Response } from 'express';
+import { requireAuth } from '../middleware/requireAuth.js';
 
 export const greetingRouter = Router();
+
+// Greeting is only called from the authenticated ChatBox
+greetingRouter.use(requireAuth);
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

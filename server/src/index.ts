@@ -1,6 +1,9 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import session from 'express-session';
+import MongoStore from 'connect-mongo';
+import passport from 'passport';
 import { WebSocketServer } from 'ws';
 import http from 'http';
 import path from 'path';
@@ -9,6 +12,8 @@ import { connectDb } from './db.js';
 import { attachWorker, isWorkerConnected } from './relay.js';
 import { chatRouter } from './routes/chat.js';
 import { greetingRouter } from './routes/greeting.js';
+import { authRouter } from './routes/auth.js';
+import { configurePassport } from './auth.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
@@ -17,15 +22,44 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 async function main() {
   await connectDb();
 
+  const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017';
+
   const app = express();
 
   // In dev (no client/dist), allow Vite's dev server origin for CORS
   if (!IS_PROD) {
-    app.use(cors({ origin: CLIENT_ORIGIN }));
+    app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
   }
+
+  // ── Session (stored in MongoDB) ────────────────────────────────────────
+  app.use(
+    session({
+      secret:            process.env.SESSION_SECRET ?? 'dev-secret-change-me',
+      resave:            false,
+      saveUninitialized: false,
+      store: MongoStore.create({
+        mongoUrl:   MONGODB_URI,
+        dbName:     process.env.MONGODB_DB ?? 'booth-radar',
+        collectionName: 'sessions',
+        ttl:        7 * 24 * 60 * 60, // 7 days in seconds
+      }),
+      cookie: {
+        httpOnly: true,
+        secure:   IS_PROD,
+        maxAge:   7 * 24 * 60 * 60 * 1000,
+        sameSite: IS_PROD ? 'strict' : 'lax',
+      },
+    }),
+  );
+
+  // ── Passport (Google OAuth) ────────────────────────────────────────────
+  configurePassport();
+  app.use(passport.initialize());
+  app.use(passport.session());
 
   app.use(express.json());
 
+  app.use('/api', authRouter);
   app.use('/api', chatRouter);
   app.use('/api', greetingRouter);
 

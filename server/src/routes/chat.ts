@@ -10,8 +10,12 @@ import {
   type BoothEntry,
   type ConversationDoc,
 } from '../relay.js';
+import { requireAuth } from '../middleware/requireAuth.js';
 
 export const chatRouter = Router();
+
+// All chat routes require authentication
+chatRouter.use(requireAuth);
 
 const MAX_MESSAGE_CHARS = 8000;
 // Number of most recent messages sent to the worker as context
