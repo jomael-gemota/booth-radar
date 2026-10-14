@@ -43,6 +43,9 @@ const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? 10 * 1024 * 1024);
 
 export interface ConversationDoc {
   _id: ObjectId;
+  userId: string;    // Google profile ID of the owner
+  title?: string;    // AI-generated title (saved by generate-title)
+  preview?: string;  // First user message, truncated
   createdAt: Date;
   updatedAt: Date;
   messages: ChatMessage[];

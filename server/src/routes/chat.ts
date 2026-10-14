@@ -25,10 +25,44 @@ function parseId(raw: string): ObjectId | null {
   return /^[a-f0-9]{24}$/i.test(raw) ? new ObjectId(raw) : null;
 }
 
+/** Find a conversation by ID scoped to the authenticated user. */
+async function findOwnedConv(id: string, userId: string): Promise<ConversationDoc | null> {
+  const oid = parseId(id);
+  if (!oid) return null;
+  return conversations().findOne({ _id: oid, userId });
+}
+
+// ── GET /api/conversations ─────────────────────────────────────────────────
+// Returns a summary list of the current user's conversations, newest first.
+chatRouter.get('/conversations', async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const docs = await conversations()
+    .find(
+      { userId },
+      {
+        projection: { messages: 0, results: 0 },
+        sort: { updatedAt: -1 },
+        limit: 200,
+      },
+    )
+    .toArray();
+
+  res.json({
+    conversations: docs.map((c) => ({
+      id:        c._id.toHexString(),
+      title:     c.title   ?? '',
+      preview:   c.preview ?? '',
+      createdAt: c.createdAt.getTime(),
+      updatedAt: c.updatedAt.getTime(),
+    })),
+  });
+});
+
 // ── POST /api/chat ─────────────────────────────────────────────────────────
 // Body: { conversationId?: string, message: string }
 // Returns: { conversationId: string, turnId: string }
 chatRouter.post('/chat', async (req: Request, res: Response) => {
+  const userId = req.user!.id;
   const { conversationId, message } = req.body as { conversationId?: string; message?: string };
 
   const text = typeof message === 'string' ? message.trim() : '';
@@ -51,8 +85,7 @@ chatRouter.post('/chat', async (req: Request, res: Response) => {
   let convo: ConversationDoc | null = null;
 
   if (conversationId) {
-    const oid = parseId(conversationId);
-    convo = oid ? await col.findOne({ _id: oid }) : null;
+    convo = await findOwnedConv(conversationId, userId);
     if (!convo) {
       res.status(404).json({ error: 'conversation not found' });
       return;
@@ -72,7 +105,17 @@ chatRouter.post('/chat', async (req: Request, res: Response) => {
     );
     convo.messages.push(userMessage);
   } else {
-    convo = { _id: new ObjectId(), createdAt: now, updatedAt: now, messages: [userMessage], results: [] };
+    // New conversation — store a preview from the first message
+    const preview = text.length > 120 ? text.slice(0, 120) + '…' : text;
+    convo = {
+      _id: new ObjectId(),
+      userId,
+      preview,
+      createdAt: now,
+      updatedAt: now,
+      messages:  [userMessage],
+      results:   [],
+    };
     await col.insertOne(convo);
   }
 
@@ -93,16 +136,15 @@ chatRouter.post('/chat', async (req: Request, res: Response) => {
 
 // ── GET /api/conversations/:id ─────────────────────────────────────────────
 chatRouter.get('/conversations/:id', async (req: Request, res: Response) => {
-  const oid = parseId(req.params.id);
-  const convo = oid ? await conversations().findOne({ _id: oid }) : null;
+  const convo = await findOwnedConv(req.params.id, req.user!.id);
   if (!convo) {
     res.status(404).json({ error: 'not found' });
     return;
   }
   res.json({
-    id: convo._id.toHexString(),
-    messages: convo.messages.map(({ role, content, attachments }) => ({ role, content, attachments })),
-    results: convo.results,
+    id:          convo._id.toHexString(),
+    messages:    convo.messages.map(({ role, content, attachments }) => ({ role, content, attachments })),
+    results:     convo.results,
     activeTurnId: activeTurnFor(req.params.id) ?? null,
   });
 });
@@ -129,8 +171,7 @@ chatRouter.get('/stream/:turnId', (req: Request, res: Response) => {
 // ── POST /api/conversations/:id/generate-title ─────────────────────────────
 // Uses GPT-4o-mini to produce a concise 4–5 word title from the first message.
 chatRouter.post('/conversations/:id/generate-title', async (req: Request, res: Response) => {
-  const oid = parseId(req.params.id);
-  const convo = oid ? await conversations().findOne({ _id: oid }) : null;
+  const convo = await findOwnedConv(req.params.id, req.user!.id);
   if (!convo) {
     res.status(404).json({ error: 'not found' });
     return;
@@ -141,6 +182,7 @@ chatRouter.post('/conversations/:id/generate-title', async (req: Request, res: R
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
+    await conversations().updateOne({ _id: convo._id }, { $set: { title: fallback } });
     res.json({ title: fallback });
     return;
   }
@@ -171,8 +213,12 @@ chatRouter.post('/conversations/:id/generate-title', async (req: Request, res: R
     interface OAIRes { choices: Array<{ message: { content: string } }> }
     const data = (await response.json()) as OAIRes;
     const raw = data.choices[0]?.message?.content?.trim() ?? '';
-    res.json({ title: raw || fallback });
+    const title = raw || fallback;
+    // Persist title to MongoDB
+    await conversations().updateOne({ _id: convo._id }, { $set: { title } });
+    res.json({ title });
   } catch {
+    await conversations().updateOne({ _id: convo._id }, { $set: { title: fallback } });
     res.json({ title: fallback });
   }
 });
@@ -180,8 +226,7 @@ chatRouter.post('/conversations/:id/generate-title', async (req: Request, res: R
 // ── GET /api/conversations/:id/export ──────────────────────────────────────
 // Returns the conversation's results table as a CSV file
 chatRouter.get('/conversations/:id/export', async (req: Request, res: Response) => {
-  const oid = parseId(req.params.id);
-  const convo = oid ? await conversations().findOne({ _id: oid }) : null;
+  const convo = await findOwnedConv(req.params.id, req.user!.id);
   if (!convo) {
     res.status(404).json({ error: 'not found' });
     return;
@@ -200,10 +245,18 @@ chatRouter.get('/conversations/:id/export', async (req: Request, res: Response) 
 // ── GET /api/files/:id ─────────────────────────────────────────────────────
 // Downloads a file the agent produced during a turn
 chatRouter.get('/files/:id', async (req: Request, res: Response) => {
-  const oid = parseId(req.params.id);
-  const file = oid ? await files().findOne({ _id: oid }) : null;
+  const userId = req.user!.id;
+  const oid    = parseId(req.params.id);
+  const file   = oid ? await files().findOne({ _id: oid }) : null;
   if (!file) {
     res.status(404).json({ error: 'not found' });
+    return;
+  }
+
+  // Verify the file belongs to a conversation the user owns
+  const ownerConvo = await conversations().findOne({ _id: file.conversationId, userId });
+  if (!ownerConvo) {
+    res.status(403).json({ error: 'Forbidden' });
     return;
   }
 
