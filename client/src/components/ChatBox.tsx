@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStream, type Attachment, type BoothEntry } from '../hooks/useStream'
+import { logout, type AuthUser } from '../hooks/useAuth'
 import ExportButton from './ExportButton'
 import './ChatBox.css'
 
@@ -95,7 +96,7 @@ function groupByDate(convs: ConversationSummary[]) {
 
 // ── ChatBox ─────────────────────────────────────────────────────────────────
 
-export default function ChatBox() {
+export default function ChatBox({ user }: { user: AuthUser }) {
   // Sidebar
   const [conversations, setConversations] = useState<ConversationSummary[]>(getConversations)
   const [sidebarOpen, setSidebarOpen]     = useState(true)
@@ -515,6 +516,37 @@ export default function ChatBox() {
             )}
           </nav>
         )}
+
+        {/* ── User profile (bottom of sidebar) ────────────────────── */}
+        <div className={`sidebar-user${sidebarOpen ? '' : ' sidebar-user--collapsed'}`}>
+          {user.picture ? (
+            <img
+              className="sidebar-user-avatar"
+              src={user.picture}
+              alt={user.name}
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <div className="sidebar-user-avatar sidebar-user-avatar--fallback">
+              {user.name.charAt(0).toUpperCase()}
+            </div>
+          )}
+          {sidebarOpen && (
+            <div className="sidebar-user-info">
+              <span className="sidebar-user-name">{user.name}</span>
+              <span className="sidebar-user-email">{user.email}</span>
+            </div>
+          )}
+          {sidebarOpen && (
+            <button
+              className="sidebar-user-logout"
+              onClick={() => void logout()}
+              title="Sign out"
+            >
+              <SignOutIcon />
+            </button>
+          )}
+        </div>
       </aside>
 
       {/* ── Main panel ──────────────────────────────────────────────── */}
@@ -1089,6 +1121,17 @@ function DownloadIcon() {
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
       <polyline points="7 10 12 15 17 10" />
       <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  )
+}
+
+function SignOutIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <polyline points="16 17 21 12 16 7" />
+      <line x1="21" y1="12" x2="9" y2="12" />
     </svg>
   )
 }
