@@ -53,11 +53,20 @@ async def handle_chat(
 ) -> None:
     loop = asyncio.get_running_loop()
 
-    def emit(type_: str, payload: dict[str, Any]) -> None:
+    def send(type_: str, payload: dict[str, Any]) -> None:
         # Called from the executor thread; hand the frame to the event loop.
         loop.call_soon_threadsafe(
             outbox.put_nowait, {"turnId": turn_id, "type": type_, "payload": payload}
         )
+
+    scrubber = artifacts.PathScrubber(lambda t: send("token", {"text": t}))
+
+    def emit(type_: str, payload: dict[str, Any]) -> None:
+        if type_ == "token":
+            scrubber.feed(payload["text"])
+            return
+        scrubber.flush()
+        send(type_, payload)
 
     out_dir = artifacts.prepare_dir(conversation_id)
     before = artifacts.snapshot(out_dir)
@@ -79,7 +88,7 @@ async def handle_chat(
     for f in files:
         emit("file", f)
 
-    emit("done", {"reply": reply, "results": new_results})
+    emit("done", {"reply": artifacts.hide_paths(reply), "results": new_results})
     log.info(
         "[worker] turn %s completed — %d result rows, %d files",
         turn_id, len(new_results), len(files),
