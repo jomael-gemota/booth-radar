@@ -248,6 +248,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       setConversationId(id)
       conversationIdRef.current = id
       localStorage.setItem(activeConvKey(user.id), id)
+      setView('chat')
       if (c.activeTurnId) {
         setBusy(true)
         setTurnId(c.activeTurnId)
@@ -429,6 +430,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     setResults([])
     setMessages([WELCOME])
     setInput('')
+    setView('chat')
     inputRef.current?.focus()
   }
 
