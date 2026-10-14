@@ -134,6 +134,15 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     el.style.height = `${el.scrollHeight}px`
   }, [input])
 
+  // Return focus to the input when a turn ends, unless the user moved to another field
+  useEffect(() => {
+    if (busy) return
+    const active = document.activeElement
+    if (!active || active === document.body || active.closest('.input-form')) {
+      inputRef.current?.focus()
+    }
+  }, [busy])
+
   // Refs for title generation (avoid stale closure issues)
   const conversationIdRef = useRef<string | null>(conversationId)
   const isFirstTurnRef    = useRef(false)
@@ -489,7 +498,6 @@ export default function ChatBox({ user }: { user: AuthUser }) {
             rows={1}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={busy}
             autoFocus
           />
           <button className="send-btn" type="submit" disabled={busy || !input.trim()}>
