@@ -26,6 +26,10 @@ async function main() {
 
   const app = express();
 
+  // Trust Railway's reverse proxy so that secure cookies and req.protocol
+  // work correctly when the app sits behind an HTTPS load balancer.
+  app.set('trust proxy', 1);
+
   // In dev (no client/dist), allow Vite's dev server origin for CORS
   if (!IS_PROD) {
     app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
@@ -47,7 +51,10 @@ async function main() {
         httpOnly: true,
         secure:   IS_PROD,
         maxAge:   7 * 24 * 60 * 60 * 1000,
-        sameSite: IS_PROD ? 'strict' : 'lax',
+        // Must be 'lax' (not 'strict') so the session cookie is sent when
+        // Google redirects the browser back to the callback URL — that
+        // redirect is a cross-site top-level navigation and 'strict' blocks it.
+        sameSite: 'lax',
       },
     }),
   );
