@@ -14,6 +14,7 @@ import { chatRouter } from './routes/chat.js';
 import { greetingRouter } from './routes/greeting.js';
 import { authRouter } from './routes/auth.js';
 import { accountRouter } from './routes/account.js';
+import { adminRouter } from './routes/admin.js';
 import { configurePassport } from './auth.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
@@ -69,6 +70,7 @@ async function main() {
 
   app.use('/api', authRouter);
   app.use('/api', accountRouter);
+  app.use('/api', adminRouter);
   app.use('/api', chatRouter);
   app.use('/api', greetingRouter);
 
