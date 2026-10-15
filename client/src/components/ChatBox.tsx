@@ -1,4 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+
+// ── Theme ─────────────────────────────────────────────────────────────────────
+
+type Theme = 'dark' | 'light'
+
+function useTheme(): { theme: Theme; toggleTheme: () => void } {
+  const [theme, setTheme] = useState<Theme>(
+    () => (localStorage.getItem('br:theme') as Theme) ?? 'dark',
+  )
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem('br:theme', theme)
+  }, [theme])
+  return { theme, toggleTheme: () => setTheme((t) => (t === 'dark' ? 'light' : 'dark')) }
+}
 import { useStream, type Attachment, type BoothEntry } from '../hooks/useStream'
 import { logout, type AuthUser } from '../hooks/useAuth'
 import AccountPage from './AccountPage'
@@ -101,6 +116,8 @@ function groupByDate(convs: ConversationSummary[]) {
 // ── ChatBox ─────────────────────────────────────────────────────────────────
 
 export default function ChatBox({ user }: { user: AuthUser }) {
+  const { theme, toggleTheme } = useTheme()
+
   // Sidebar
   const [conversations, setConversations] = useState<ConversationSummary[]>(() => getConversations(user.id))
   const [sidebarOpen, setSidebarOpen]     = useState(true)
@@ -549,13 +566,24 @@ export default function ChatBox({ user }: { user: AuthUser }) {
             <RadarLogoIcon className="sidebar-brand-icon" />
             {sidebarOpen && <span className="sidebar-brand-name">Booth Radar</span>}
           </div>
-          <button
-            className="sidebar-collapse-btn"
-            onClick={() => setSidebarOpen((o) => !o)}
-            title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-          >
-            {sidebarOpen ? <CollapseIcon /> : <ExpandIcon />}
-          </button>
+          <div className="sidebar-top-actions">
+            {sidebarOpen && (
+              <button
+                className="sidebar-theme-btn"
+                onClick={toggleTheme}
+                title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+              >
+                {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+              </button>
+            )}
+            <button
+              className="sidebar-collapse-btn"
+              onClick={() => setSidebarOpen((o) => !o)}
+              title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+            >
+              {sidebarOpen ? <CollapseIcon /> : <ExpandIcon />}
+            </button>
+          </div>
         </div>
 
         <button className="new-chat-btn" onClick={newChat} title="New chat">
@@ -1416,6 +1444,32 @@ function ClockIcon() {
       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="10" />
       <polyline points="12 6 12 12 16 14" />
+    </svg>
+  )
+}
+
+function SunIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="4" />
+      <line x1="12" y1="2"  x2="12" y2="4" />
+      <line x1="12" y1="20" x2="12" y2="22" />
+      <line x1="4.22" y1="4.22"  x2="5.64" y2="5.64" />
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+      <line x1="2"  y1="12" x2="4"  y2="12" />
+      <line x1="20" y1="12" x2="22" y2="12" />
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+      <line x1="18.36" y1="5.64"  x2="19.78" y2="4.22" />
+    </svg>
+  )
+}
+
+function MoonIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
     </svg>
   )
 }

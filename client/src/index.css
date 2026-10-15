@@ -34,8 +34,36 @@ body {
   height: 100%;
 }
 
+/* ── Light mode tokens — "Warm Mist" ───────────────────────────────────── */
+/*
+ * Design goal: comfortable for 4+ hour sessions.
+ * – Low saturation throughout (no vivid hues that tire eyes)
+ * – Barely-there purple tint (looks polished without colour overload)
+ * – Soft accent (same purple family as dark mode, just calmer)
+ * – Not pure white — the slight tint cuts glare
+ * – Dark charcoal text, not pure black (reduces harsh contrast)
+ */
+[data-theme="light"] {
+  --sidebar-bg:    #efedf6;   /* barely-lavender sidebar, clearly distinct  */
+  --main-bg:       #f7f6f9;   /* off-white with the faintest purple hint     */
+  --surface:       #eceaf4;   /* cards sit one level below sidebar           */
+  --surface-hover: #e4e1ef;
+  --border:        #d8d5ea;
+  --accent:        #7c6fe0;   /* same soft purple as dark mode — not harsh   */
+  --accent-hover:  #6b5fd4;
+  --accent-dim:    rgba(124, 111, 224, 0.10);
+  --text:          #1e1c2e;   /* deep charcoal — readable, not pure black    */
+  --text-muted:    #5a5770;   /* muted purple-gray, comfortable              */
+  --text-faint:    #9896b0;   /* faint but legible                           */
+  --error:         #d94040;
+  --success:       #2d9e6b;
+  color-scheme: light;
+}
+
 /* ── Custom scrollbar ───────────────────────────────────────────────────── */
 ::-webkit-scrollbar            { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track      { background: transparent; }
 ::-webkit-scrollbar-thumb      { background: var(--border); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover{ background: #505050; }
+::-webkit-scrollbar-thumb:hover{ background: #a0a0a8; }
+
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #b0b0bc; }

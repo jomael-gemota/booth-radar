@@ -73,7 +73,15 @@
   letter-spacing: -0.01em;
 }
 
-.sidebar-collapse-btn {
+.sidebar-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sidebar-collapse-btn,
+.sidebar-theme-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -88,7 +96,8 @@
   flex-shrink: 0;
 }
 
-.sidebar-collapse-btn:hover {
+.sidebar-collapse-btn:hover,
+.sidebar-theme-btn:hover {
   background: var(--surface-hover);
   color: var(--text-muted);
 }
@@ -1153,6 +1162,109 @@
   color: var(--text-muted);
   max-width: 420px;
   line-height: 1.7;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   LIGHT MODE — "Warm Mist" colour overrides + polish
+   All shadows and tints are neutral or barely-purple — no saturated hues
+   that would cause eye fatigue during long sessions.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Code blocks — warm readable gray ───────────────────────────────────── */
+[data-theme="light"] .code-block {
+  background:   #e8e6f2;
+  border-color: #cac7de;
+  color:        #1e1c2e;
+}
+
+[data-theme="light"] .code-inline {
+  background:   #e4e2f0;
+  border-color: #c6c3dc;
+  color:        #6b5fd4;
+}
+
+/* ── Thinking bubble ─────────────────────────────────────────────────────── */
+[data-theme="light"] .thinking-header      { color: #7c6fe0; }
+[data-theme="light"] .thinking-header:hover{ color: #6b5fd4; }
+[data-theme="light"] .thinking-orb         { background: #7c6fe0; }
+[data-theme="light"] .thinking-chevron     { color: #7c6fe0; }
+[data-theme="light"] .thinking-body {
+  color:             #7c6fe0;
+  border-left-color: rgba(124, 111, 224, 0.28);
+  scrollbar-color:   rgba(124, 111, 224, 0.18) transparent;
+}
+
+/* ── Results table header row ────────────────────────────────────────────── */
+[data-theme="light"] .results-table th {
+  background: #dddaea;
+  color:      var(--text-muted);
+}
+
+/* ── System error message ────────────────────────────────────────────────── */
+[data-theme="light"] .msg-system {
+  background:   rgba(217, 64, 64, 0.06);
+  border-color: rgba(217, 64, 64, 0.22);
+  color:        #d94040;
+}
+
+/* ── Spinners ────────────────────────────────────────────────────────────── */
+[data-theme="light"] .spinner {
+  border-color:     rgba(124, 111, 224, 0.15);
+  border-top-color: var(--accent);
+}
+/* Send-button spinner stays white — sits on the purple button */
+[data-theme="light"] .send-btn .spinner {
+  border-color:     rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+}
+
+/* ── User bubble — clean white card, gentle neutral shadow ───────────────── */
+[data-theme="light"] .msg-bubble--user {
+  background:   #ffffff;
+  border-color: #d4d0e6;
+  box-shadow:   0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+/* ── Input wrapper — white, softly elevated ──────────────────────────────── */
+[data-theme="light"] .input-wrapper {
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+/* ── New-chat button ─────────────────────────────────────────────────────── */
+[data-theme="light"] .new-chat-btn {
+  background:   rgba(124, 111, 224, 0.04);
+  border-color: #d8d5ea;
+}
+[data-theme="light"] .new-chat-btn:hover {
+  background:   rgba(124, 111, 224, 0.08);
+  border-color: var(--accent);
+}
+
+/* ── Conversation list items ─────────────────────────────────────────────── */
+[data-theme="light"] .conv-item:hover {
+  background: rgba(124, 111, 224, 0.05);
+}
+[data-theme="light"] .conv-item--active {
+  background: rgba(124, 111, 224, 0.09);
+  color:      var(--text);
+}
+
+/* ── Profile popover menu ────────────────────────────────────────────────── */
+[data-theme="light"] .sidebar-profile-menu {
+  background:   #ffffff;
+  border-color: #d4d0e6;
+  box-shadow:   0 4px 20px rgba(0, 0, 0, 0.08), 0 1px 4px rgba(0, 0, 0, 0.04);
+}
+
+/* ── Chat header — clean bottom separator ────────────────────────────────── */
+[data-theme="light"] .chat-header {
+  box-shadow: 0 1px 0 var(--border);
+}
+
+/* ── Sign-in card — natural elevation, no colour cast ───────────────────── */
+[data-theme="light"] .signin-card {
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08), 0 1px 4px rgba(0, 0, 0, 0.04);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
