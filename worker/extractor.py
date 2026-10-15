@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 MAX_PAGE_CHARS    = int(os.getenv("MAX_PAGE_CHARS", "40000"))
 REQUEST_TIMEOUT   = int(os.getenv("REQUEST_TIMEOUT", "120"))
 MAX_TOKENS        = int(os.getenv("MAX_TOKENS", "8192"))
+ACK_MODEL         = os.getenv("ACK_MODEL", "gpt-4o-mini")
 
 
 # ── Thinking filter ────────────────────────────────────────────────────────
@@ -96,6 +97,21 @@ Rules:
 """
 
 _client: Optional[OpenAI] = None
+_ack_client: Optional[OpenAI] = None
+
+
+def quick_completion(messages: list[dict[str, str]], max_tokens: int = 120) -> str:
+    """Short non-streaming reply from ACK_MODEL on OpenAI (needs OPENAI_API_KEY)."""
+    global _ack_client
+    if _ack_client is None:
+        _ack_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=15)
+    resp = _ack_client.chat.completions.create(
+        model=ACK_MODEL,
+        messages=messages,  # type: ignore[arg-type]
+        max_tokens=max_tokens,
+        temperature=0.8,
+    )
+    return (resp.choices[0].message.content or "").strip()
 
 
 def _get_client() -> OpenAI:
