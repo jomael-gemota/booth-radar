@@ -1170,14 +1170,14 @@
 
 /* Code blocks */
 [data-theme="light"] .code-block {
-  background:   #f5f6fa;
-  border-color: #dde0ea;
+  background:   #e4e5ee;
+  border-color: #c8c9dc;
   color:        #1e2030;
 }
 
 [data-theme="light"] .code-inline {
-  background:   #ebebf5;
-  border-color: #d4d5e8;
+  background:   #e2e3ee;
+  border-color: #c4c5d8;
   color:        #5a4fc2;
 }
 
@@ -1194,7 +1194,7 @@
 
 /* Results table header row */
 [data-theme="light"] .results-table th {
-  background: #f1f1f6;
+  background: #dfe0ec;
   color:      var(--text-muted);
 }
 

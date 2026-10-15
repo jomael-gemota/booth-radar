@@ -36,17 +36,17 @@ body {
 
 /* ── Light mode tokens ──────────────────────────────────────────────────── */
 [data-theme="light"] {
-  --sidebar-bg:    #f8f8fa;
-  --main-bg:       #ffffff;
-  --surface:       #f1f1f5;
-  --surface-hover: #e8e8ed;
-  --border:        #e0e0e8;
+  --sidebar-bg:    #e8e9f0;   /* distinct, muted sidebar */
+  --main-bg:       #f2f3f8;   /* soft blue-gray — never pure white */
+  --surface:       #eaebf2;   /* cards sit one step above main */
+  --surface-hover: #dfe0ea;
+  --border:        #cfd0de;
   --accent:        #6b5fd4;
   --accent-hover:  #5a4fc2;
-  --accent-dim:    rgba(107, 95, 212, 0.10);
-  --text:          #111118;
-  --text-muted:    #52525e;
-  --text-faint:    #9898a8;
+  --accent-dim:    rgba(107, 95, 212, 0.12);
+  --text:          #0f0f1a;
+  --text-muted:    #4a4a60;
+  --text-faint:    #8a8aa8;
   --error:         #dc2626;
   --success:       #16a34a;
   color-scheme: light;
