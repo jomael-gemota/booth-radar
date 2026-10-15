@@ -27,6 +27,12 @@ export interface UserProfile {
   jobTitle?: string;
   department?: string;
   updatedAt: Date;
+  // Identity fields mirrored from Google (populated on first/each login)
+  name?: string;
+  email?: string;
+  picture?: string;
+  // Presence tracking
+  lastSeenAt?: Date;
 }
 
 export function getUserProfiles(): Collection<UserProfile> {
