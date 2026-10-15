@@ -728,6 +728,39 @@
   border-radius: 1px;
 }
 
+/* ── Response duration label ─────────────────────────────────────────────── */
+
+.msg-duration {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 6px;
+  font-size: 0.71rem;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  user-select: none;
+  margin-right: 2px;
+  opacity: 0.75;
+}
+
+/* Separator after the duration label, before the first copy button */
+.msg-duration + .copy-btn {
+  position: relative;
+  margin-left: 2px;
+}
+
+.msg-duration + .copy-btn::before {
+  content: '';
+  position: absolute;
+  left: -3px;
+  top: 20%;
+  height: 60%;
+  width: 1px;
+  background: var(--border);
+  border-radius: 1px;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    ATTACHMENTS
    ══════════════════════════════════════════════════════════════════════════ */

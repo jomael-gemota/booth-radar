@@ -15,6 +15,7 @@ interface Message {
   text: string
   streaming?: boolean
   attachments?: Attachment[]
+  duration?: number   // ms elapsed from send → turn complete
 }
 
 interface ConversationSummary {
@@ -123,6 +124,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   const streamingMsgId = useRef<string | null>(null)
   const thinkingMsgId  = useRef<string | null>(null)
   const inputRef       = useRef<HTMLTextAreaElement>(null)
+  const turnStartRef   = useRef<number | null>(null)
 
   // ── Auto-resize textarea ───────────────────────────────────────────────
   useEffect(() => {
@@ -254,6 +256,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       if (c.activeTurnId) {
         setBusy(true)
         setTurnId(c.activeTurnId)
+        turnStartRef.current = Date.now()
       }
     } catch {
       if (onMount) {
@@ -285,14 +288,18 @@ export default function ChatBox({ user }: { user: AuthUser }) {
 
   // ── Stream handlers ────────────────────────────────────────────────────
 
-  function finishStreaming() {
+  function finishStreaming(duration?: number) {
     const id = streamingMsgId.current
     streamingMsgId.current = null
     if (id) {
       setMessages((prev) =>
         prev
           .filter((m) => m.id !== id || m.text.trim() !== '' || m.attachments?.length)
-          .map((m) => (m.id === id ? { ...m, streaming: false } : m)),
+          .map((m) =>
+            m.id === id
+              ? { ...m, streaming: false, ...(duration != null ? { duration } : {}) }
+              : m,
+          ),
       )
     }
     const tid = thinkingMsgId.current
@@ -346,7 +353,9 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   }
 
   function endTurn() {
-    finishStreaming()
+    const elapsed = turnStartRef.current != null ? Date.now() - turnStartRef.current : undefined
+    turnStartRef.current = null
+    finishStreaming(elapsed)
     setBusy(false)
     setTurnId(null)
     // Generate a proper title for the first turn of a new conversation
@@ -401,6 +410,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       conversationIdRef.current = body.conversationId
       localStorage.setItem(activeConvKey(user.id), body.conversationId)
       setTurnId(body.turnId)
+      turnStartRef.current = Date.now()
 
       // Track in sidebar — add if it's a brand-new conversation
       if (!conversations.find((c) => c.id === body.conversationId)) {
@@ -863,6 +873,12 @@ function MessageBubble({ msg, conversationId, hasResults }: MessageBubbleProps) 
         )}
         {!msg.streaming && msg.text.trim() && (
           <div className="msg-actions">
+            {msg.duration != null && (
+              <span className="msg-duration" title="Time to respond">
+                <ClockIcon />
+                {formatDuration(msg.duration)}
+              </span>
+            )}
             <CopyButton text={msg.text} />
             {conversationId && hasResults && (
               <ExportCsvButton conversationId={conversationId} />
@@ -872,6 +888,13 @@ function MessageBubble({ msg, conversationId, hasResults }: MessageBubbleProps) 
       </div>
     </div>
   )
+}
+
+// ── Duration formatting ───────────────────────────────────────────────────────
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
 }
 
 // ── Markdown rendering ───────────────────────────────────────────────────────
@@ -1237,6 +1260,16 @@ function AccountIcon() {
       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
       <circle cx="12" cy="7" r="4" />
+    </svg>
+  )
+}
+
+function ClockIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
     </svg>
   )
 }
