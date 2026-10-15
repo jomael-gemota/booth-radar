@@ -1165,66 +1165,104 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   LIGHT MODE — hardcoded colour overrides
+   LIGHT MODE — "Violet Frost" colour overrides + polish
    ══════════════════════════════════════════════════════════════════════════ */
 
-/* Code blocks */
+/* ── Code blocks ─────────────────────────────────────────────────────────── */
 [data-theme="light"] .code-block {
-  background:   #e4e5ee;
-  border-color: #c8c9dc;
-  color:        #1e2030;
+  background:   #e8e4fc;
+  border-color: #c4baea;
+  color:        #1a1630;
 }
 
 [data-theme="light"] .code-inline {
-  background:   #e2e3ee;
-  border-color: #c4c5d8;
-  color:        #5a4fc2;
+  background:   #e4e0fa;
+  border-color: #bdb5e8;
+  color:        #6d28d9;
 }
 
-/* Thinking bubble */
-[data-theme="light"] .thinking-header      { color: #6b5fd4; }
-[data-theme="light"] .thinking-header:hover{ color: #4f44b0; }
-[data-theme="light"] .thinking-orb         { background: #6b5fd4; }
-[data-theme="light"] .thinking-chevron     { color: #6b5fd4; }
+/* ── Thinking bubble ─────────────────────────────────────────────────────── */
+[data-theme="light"] .thinking-header      { color: #7c3aed; }
+[data-theme="light"] .thinking-header:hover{ color: #6d28d9; }
+[data-theme="light"] .thinking-orb         { background: #7c3aed; }
+[data-theme="light"] .thinking-chevron     { color: #7c3aed; }
 [data-theme="light"] .thinking-body {
-  color:            #6b5fd4;
-  border-left-color: rgba(107, 95, 212, 0.28);
-  scrollbar-color:  rgba(107, 95, 212, 0.22) transparent;
+  color:             #7c3aed;
+  border-left-color: rgba(124, 58, 237, 0.30);
+  scrollbar-color:   rgba(124, 58, 237, 0.20) transparent;
 }
 
-/* Results table header row */
+/* ── Results table header row ────────────────────────────────────────────── */
 [data-theme="light"] .results-table th {
-  background: #dfe0ec;
+  background: #ddd8f8;
   color:      var(--text-muted);
 }
 
-/* System error message */
+/* ── System error message ────────────────────────────────────────────────── */
 [data-theme="light"] .msg-system {
   background:   rgba(220, 38, 38, 0.06);
   border-color: rgba(220, 38, 38, 0.22);
   color:        #dc2626;
 }
 
-/* Inline spinner (loading state, not inside send button) */
+/* ── Spinners ────────────────────────────────────────────────────────────── */
 [data-theme="light"] .spinner {
-  border-color:     rgba(0, 0, 0, 0.12);
+  border-color:     rgba(124, 58, 237, 0.15);
   border-top-color: var(--accent);
 }
-
-/* Send-button spinner stays white — it sits on the purple button */
+/* Send-button spinner stays white — sits on the violet button */
 [data-theme="light"] .send-btn .spinner {
-  border-color:     rgba(255, 255, 255, 0.3);
+  border-color:     rgba(255, 255, 255, 0.35);
   border-top-color: #fff;
 }
 
-/* Profile menu shadow */
-[data-theme="light"] .sidebar-profile-menu {
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.10);
+/* ── Elevated user message bubble ────────────────────────────────────────── */
+[data-theme="light"] .msg-bubble--user {
+  background:   #ffffff;
+  border-color: #d0cbf0;
+  box-shadow:   0 1px 4px rgba(124, 58, 237, 0.08);
 }
 
-/* Sign-in card shadow (also covers AccountPage card-level shadow if any) */
+/* ── Elevated input wrapper ──────────────────────────────────────────────── */
+[data-theme="light"] .input-wrapper {
+  background: #ffffff;
+  box-shadow: 0 1px 6px rgba(124, 58, 237, 0.07);
+}
+
+/* ── New-chat button — subtle violet tint ────────────────────────────────── */
+[data-theme="light"] .new-chat-btn {
+  background:   rgba(124, 58, 237, 0.05);
+  border-color: #cbc6ec;
+}
+[data-theme="light"] .new-chat-btn:hover {
+  background:   rgba(124, 58, 237, 0.10);
+  border-color: var(--accent);
+}
+
+/* ── Active conv item — accent-tinted ────────────────────────────────────── */
+[data-theme="light"] .conv-item--active {
+  background: rgba(124, 58, 237, 0.10);
+  color:      var(--text);
+}
+[data-theme="light"] .conv-item:hover {
+  background: rgba(124, 58, 237, 0.06);
+}
+
+/* ── Profile menu — white card with violet shadow ────────────────────────── */
+[data-theme="light"] .sidebar-profile-menu {
+  background:  #ffffff;
+  border-color: #d8d4f4;
+  box-shadow:  0 6px 24px rgba(124, 58, 237, 0.14), 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+/* ── Chat header — subtle shadow instead of plain border ─────────────────── */
+[data-theme="light"] .chat-header {
+  box-shadow: 0 1px 0 var(--border), 0 2px 8px rgba(124, 58, 237, 0.04);
+}
+
+/* ── Sign-in card — violet-hued elevation ────────────────────────────────── */
 [data-theme="light"] .signin-card {
-  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 4px 32px rgba(124, 58, 237, 0.12), 0 1px 4px rgba(0, 0, 0, 0.05);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

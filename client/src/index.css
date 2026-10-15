@@ -34,21 +34,21 @@ body {
   height: 100%;
 }
 
-/* ── Light mode tokens ──────────────────────────────────────────────────── */
+/* ── Light mode tokens — "Violet Frost" ─────────────────────────────────── */
 [data-theme="light"] {
-  --sidebar-bg:    #e8e9f0;   /* distinct, muted sidebar */
-  --main-bg:       #f2f3f8;   /* soft blue-gray — never pure white */
-  --surface:       #eaebf2;   /* cards sit one step above main */
-  --surface-hover: #dfe0ea;
-  --border:        #cfd0de;
-  --accent:        #6b5fd4;
-  --accent-hover:  #5a4fc2;
-  --accent-dim:    rgba(107, 95, 212, 0.12);
-  --text:          #0f0f1a;
-  --text-muted:    #4a4a60;
-  --text-faint:    #8a8aa8;
+  --sidebar-bg:    #ede9fe;   /* violet-100 — rich lavender sidebar   */
+  --main-bg:       #f5f3ff;   /* violet-50  — very subtle violet-white */
+  --surface:       #eeedf8;   /* cards: one step less saturated        */
+  --surface-hover: #e2dff5;
+  --border:        #cbc6ec;
+  --accent:        #7c3aed;   /* violet-600 — vivid, high-energy       */
+  --accent-hover:  #6d28d9;   /* violet-700                             */
+  --accent-dim:    rgba(124, 58, 237, 0.10);
+  --text:          #0c0a20;   /* near-black with violet undertone       */
+  --text-muted:    #454270;   /* muted violet-gray                      */
+  --text-faint:    #9590c0;   /* soft violet-gray                       */
   --error:         #dc2626;
-  --success:       #16a34a;
+  --success:       #059669;
   color-scheme: light;
 }
 
