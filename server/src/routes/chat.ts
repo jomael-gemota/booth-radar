@@ -168,6 +168,32 @@ chatRouter.get('/stream/:turnId', (req: Request, res: Response) => {
   res.on('close', () => clearInterval(ping));
 });
 
+// ── PATCH /api/conversations/:id ──────────────────────────────────────────
+// Body: { title: string }  — lets the user rename a conversation
+chatRouter.patch('/conversations/:id', async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const { title } = req.body as { title?: unknown };
+
+  if (typeof title !== 'string' || !title.trim()) {
+    res.status(400).json({ error: 'title is required' });
+    return;
+  }
+
+  const convo = await findOwnedConv(req.params.id, userId);
+  if (!convo) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+
+  const trimmed = title.trim().slice(0, 100);
+  await conversations().updateOne(
+    { _id: convo._id },
+    { $set: { title: trimmed, updatedAt: new Date() } },
+  );
+
+  res.json({ title: trimmed });
+});
+
 // ── POST /api/conversations/:id/generate-title ─────────────────────────────
 // Uses GPT-4o-mini to produce a concise 4–5 word title from the first message.
 chatRouter.post('/conversations/:id/generate-title', async (req: Request, res: Response) => {
