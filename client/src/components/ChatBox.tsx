@@ -333,6 +333,8 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   function handleThinking(text: string) {
     const tid = thinkingMsgId.current
     if (!tid) {
+      // Close the reply bubble so text after this reasoning appears below it, not above
+      if (streamingMsgId.current) finishStreaming()
       const newId = genId()
       thinkingMsgId.current = newId
       addMessage({ id: newId, role: 'thinking', text, streaming: true })
@@ -539,7 +541,9 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   const displayMessages = messages.filter((m) => m.id !== 'welcome')
 
   const last      = messages[messages.length - 1]
-  const showTyping = busy && !(last?.role === 'assistant' && last.streaming)
+  const showTyping = busy && !(
+    (last?.role === 'assistant' || last?.role === 'thinking') && last.streaming
+  )
   const activeTitle = conversationId
     ? (conversations.find((c) => c.id === conversationId)?.title ?? 'Conversation')
     : 'New chat'
@@ -1119,7 +1123,7 @@ function MessageContent({ text, streaming }: { text: string; streaming?: boolean
       className={`msg-content${streaming ? ' msg-content--streaming' : ''}`}
       dangerouslySetInnerHTML={{
         __html:
-          renderMarkdown(text) +
+          renderMarkdown(text.trim()) +
           (streaming ? '<span class="cursor-blink">▌</span>' : ''),
       }}
     />

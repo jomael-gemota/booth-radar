@@ -545,7 +545,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 3px 20px;
+  /* left padding = row padding + avatar + gap, so it lines up with message text */
+  padding: 3px 20px 3px 60px;
   max-width: 860px;
   width: 100%;
   margin: 0 auto;
@@ -618,6 +619,7 @@
   max-width: 860px;
   width: calc(100% - 40px);
   margin: 0 auto 6px;
+  padding-left: 40px; /* avatar + gap, so it lines up with message text */
   box-sizing: border-box;
   /* No border box — completely borderless container */
 }
