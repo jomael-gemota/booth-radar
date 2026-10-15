@@ -614,8 +614,9 @@
 }
 
 .thinking-header {
-  display: inline-flex;
+  display: flex;
   align-items: center;
+  width: 100%;
   gap: 8px;
   padding: 3px 0;
   background: transparent;
@@ -629,6 +630,7 @@
   transition: color 0.15s;
   user-select: none;
   border-radius: 4px;
+  overflow: hidden;
 }
 
 .thinking-header:hover {
@@ -664,8 +666,24 @@
 
 .thinking-label {
   flex: 1;
+  min-width: 0;
   font-weight: 400;
   letter-spacing: 0.01em;
+  overflow: hidden;
+}
+
+/* Live preview line shown while collapsed + streaming */
+.thinking-preview {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: thinking-line-in 0.18s ease;
+}
+
+@keyframes thinking-line-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0);   }
 }
 
 .thinking-chevron {

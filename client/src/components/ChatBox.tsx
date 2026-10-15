@@ -1061,12 +1061,31 @@ function MessageContent({ text, streaming }: { text: string; streaming?: boolean
 // ── ThinkingBubble ───────────────────────────────────────────────────────────
 
 function ThinkingBubble({ text, streaming }: { text: string; streaming?: boolean }) {
-  // Auto-expand while streaming; collapse (but keep accessible) once done
-  const [expanded, setExpanded] = useState(!!streaming)
+  // Always start collapsed — user can expand manually
+  const [expanded, setExpanded]       = useState(false)
+  const [displayLine, setDisplayLine] = useState('')
+  // Bumped only when a brand-new line starts → re-mounts the span → CSS animation fires
+  const [lineKey, setLineKey]         = useState(0)
+  const prevLineCountRef              = useRef(0)
 
+  // Keep the collapsed preview updated and animate on new lines
   useEffect(() => {
-    if (streaming) setExpanded(true)
-    else           setExpanded(false)
+    if (!streaming) return
+    const lines  = text.split('\n').map((s) => s.trim()).filter(Boolean)
+    const latest = lines.at(-1) ?? ''
+    const count  = lines.length
+
+    if (count > prevLineCountRef.current) {
+      // A new line just started — trigger the slide-in animation
+      setLineKey((k) => k + 1)
+      prevLineCountRef.current = count
+    }
+    setDisplayLine(latest)
+  }, [text, streaming])
+
+  // Reset counter when a turn ends so the next turn starts fresh
+  useEffect(() => {
+    if (!streaming) prevLineCountRef.current = 0
   }, [streaming])
 
   return (
@@ -1079,7 +1098,18 @@ function ThinkingBubble({ text, streaming }: { text: string; streaming?: boolean
       >
         <span className={`thinking-orb${streaming ? ' thinking-orb--pulse' : ''}`} />
         <span className="thinking-label">
-          {streaming ? 'Thinking…' : 'View reasoning'}
+          {streaming && !expanded ? (
+            // Collapsed while streaming: live preview of the current line
+            <span key={lineKey} className="thinking-preview">
+              {displayLine || 'Thinking…'}
+            </span>
+          ) : streaming ? (
+            // Expanded while streaming
+            'Thinking…'
+          ) : (
+            // Done
+            'View reasoning'
+          )}
         </span>
         <span className="thinking-chevron" aria-hidden>
           <ChevronDownIcon />
