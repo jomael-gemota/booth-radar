@@ -113,9 +113,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   // Active conversation
   const [messages,        setMessages]        = useState<Message[]>([WELCOME])
   const [input,           setInput]           = useState('')
-  const [conversationId,  setConversationId]  = useState<string | null>(
-    () => localStorage.getItem(activeConvKey(user.id)),
-  )
+  const [conversationId,  setConversationId]  = useState<string | null>(null)
   const [turnId,   setTurnId]   = useState<string | null>(null)
   const [results,  setResults]  = useState<BoothEntry[]>([])
   const [busy,     setBusy]     = useState(false)
@@ -220,13 +218,8 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   }, [profileMenuOpen])
 
   // ── Restore active conversation on mount ───────────────────────────────
-
-  useEffect(() => {
-    const saved = localStorage.getItem(activeConvKey(user.id))
-    if (!saved) return
-    void loadConversation(saved, true)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []) // intentionally runs once on mount — loadConversation is stable, user.id is immutable
+  // Intentionally not restoring the last conversation on login — users always
+  // land on the New Chat UI. They can resume a previous conversation from the sidebar.
 
   // ── Auto-scroll ────────────────────────────────────────────────────────
 
