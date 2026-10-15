@@ -190,7 +190,7 @@ export default function UserLogsPage({ onBack }: UserLogsPageProps) {
             )}
 
             <p className="ul-footnote">
-              Online = active within the last 5 minutes. Refreshes automatically every 30 s.
+              Online = active within the last 1 minute. Refreshes automatically every 30 s.
             </p>
           </>
         )}
