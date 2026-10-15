@@ -17,6 +17,7 @@ function useTheme(): { theme: Theme; toggleTheme: () => void } {
 import { useStream, type Attachment, type BoothEntry } from '../hooks/useStream'
 import { logout, type AuthUser } from '../hooks/useAuth'
 import AccountPage from './AccountPage'
+import UserLogsPage from './UserLogsPage'
 import ExportButton from './ExportButton'
 import './ChatBox.css'
 
@@ -122,9 +123,9 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   const [conversations, setConversations] = useState<ConversationSummary[]>(() => getConversations(user.id))
   const [sidebarOpen, setSidebarOpen]     = useState(true)
 
-  // Profile dropdown + account page
+  // Profile dropdown + account / admin pages
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
-  const [view, setView] = useState<'chat' | 'account'>('chat')
+  const [view, setView] = useState<'chat' | 'account' | 'userlogs'>('chat')
   const [nickname, setNickname] = useState<string | null>(null)
   const profileMenuRef = useRef<HTMLDivElement>(null)
 
@@ -695,6 +696,14 @@ export default function ChatBox({ user }: { user: AuthUser }) {
               >
                 <AccountIcon /> My Account
               </button>
+              {user.email === 'jomael@outdoorequipped.com' && (
+                <button
+                  className="sidebar-profile-menu-item"
+                  onClick={() => { setProfileMenuOpen(false); setView('userlogs') }}
+                >
+                  <UsersIcon /> User Logs
+                </button>
+              )}
               <div className="sidebar-profile-menu-divider" />
               <button
                 className="sidebar-profile-menu-item sidebar-profile-menu-item--danger"
@@ -746,7 +755,16 @@ export default function ChatBox({ user }: { user: AuthUser }) {
           <AccountPage
             user={user}
             onBack={() => setView('chat')}
-            onNicknameChange={(name) => setNickname(name)}          />
+            onNicknameChange={(name) => setNickname(name)}
+          />
+
+        ) : view === 'userlogs' ? (
+
+          /* ── Admin: User Logs page (jomael only) ──────────────────── */
+          <UserLogsPage
+            user={user}
+            onBack={() => setView('chat')}
+          />
 
         ) : (
           /* ── Chat view ────────────────────────────────────────────── */
@@ -1483,6 +1501,18 @@ function AccountIcon() {
       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
       <circle cx="12" cy="7" r="4" />
+    </svg>
+  )
+}
+
+function UsersIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
     </svg>
   )
 }
