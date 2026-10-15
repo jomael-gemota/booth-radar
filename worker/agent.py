@@ -293,6 +293,29 @@ def _run_tool(name: str, args: dict[str, Any], results: list[Row], emit: Emit) -
     return f"Error: unknown tool {name!r}. Available: fetch_page, extract_booths, clear_results."
 
 
+# ── Preambles ──────────────────────────────────────────────────────────────
+
+NATIVE_TOOL_PREAMBLE = "On it! Give me a moment while I look into this 🔍"
+
+
+def _preamble_for(name: str, args: dict[str, Any]) -> str:
+    """Fallback message shown when Hermes calls a tool without saying anything first."""
+    if name == "fetch_page":
+        url = str(args.get("url", "")).strip()
+        if args.get("offset"):
+            return f"Let me read a bit further down {url} 📖"
+        return f"Let me open {url} and see how it's laid out 🔍"
+    if name == "extract_booths":
+        urls = args.get("urls")
+        count = 1 if isinstance(urls, str) else len(urls) if isinstance(urls, list) else 0
+        if count > 1:
+            return f"Great, I'll collect the brands and booth numbers from {count} pages now — this may take a moment! 📄"
+        return "Great, I'll collect the brands and booth numbers from that page now 📄"
+    if name == "clear_results":
+        return "Sure! I'll clear the results table so we can start fresh 🧹"
+    return "Give me a moment while I work on that 🔍"
+
+
 # ── Turn ───────────────────────────────────────────────────────────────────
 
 def _context_prompt(results: list[Row]) -> str:
@@ -340,12 +363,31 @@ def run_turn(
         if cancel and cancel.is_set():
             raise TurnCancelled()
 
-        filt = _ToolBlockFilter(lambda t: emit("token", {"text": t}))
+        spoke = False
+        native_preamble = ""
+
+        def on_visible(t: str) -> None:
+            nonlocal spoke
+            if t.strip():
+                spoke = True
+            emit("token", {"text": t})
+
+        def on_tool_progress(t: str) -> None:
+            # Hermes is running one of its own tools; make sure the user hears from us first.
+            nonlocal spoke, native_preamble
+            if not spoke:
+                spoke = True
+                native_preamble = NATIVE_TOOL_PREAMBLE
+                emit("token", {"text": native_preamble + "\n\n"})
+            emit("thinking", {"text": t})
+
+        filt = _ToolBlockFilter(on_visible)
         text = chat_stream(
             convo,
             on_token=filt.feed,
             on_thinking=lambda t: emit("thinking", {"text": t}),
             cancel=cancel,
+            on_tool_progress=on_tool_progress,
         )
         filt.flush()
 
@@ -354,14 +396,15 @@ def run_turn(
 
         idx = text.find(TOOL_OPEN)
         visible = (text if idx == -1 else text[:idx]).strip()
-        if visible:
-            reply_parts.append(visible)
+        if native_preamble:
+            visible = f"{native_preamble}\n\n{visible}".strip()
         if idx == -1:
+            if visible:
+                reply_parts.append(visible)
             break
 
         match = _TOOL_RE.search(text, idx)
         raw_call = match.group(1) if match else ""
-        convo.append({"role": "assistant", "content": text[: match.end() if match else len(text)]})
 
         try:
             call = json.loads(raw_call)
@@ -370,9 +413,23 @@ def run_turn(
             if not isinstance(args, dict):
                 raise ValueError("'args' must be an object")
         except (json.JSONDecodeError, ValueError, AttributeError) as exc:
+            call_ok = False
             observation = f"Error: could not parse tool call ({exc}). Use valid JSON."
             name = "invalid"
         else:
+            call_ok = True
+
+        if call_ok and not visible:
+            visible = _preamble_for(name, args)
+            log.info("[agent] step %d: tool call had no preamble, using fallback", step + 1)
+            emit("token", {"text": visible})
+        if visible:
+            reply_parts.append(visible)
+
+        raw_assistant = text[idx: match.end() if match else len(text)]
+        convo.append({"role": "assistant", "content": f"{visible}\n\n{raw_assistant}".strip()})
+
+        if call_ok:
             log.info("[agent] step %d tool=%s args=%s", step + 1, name, args)
             try:
                 observation = _run_tool(name, args, results, emit)
