@@ -7,6 +7,7 @@ Usage:
     python test_local.py --probe-api                       # probe Hermes API for thinking format
     python test_local.py --probe-server                    # discover all server endpoints + params
     python test_local.py --probe-raw                       # dump raw SSE wire bytes (bypasses SDK)
+    python test_local.py --probe-raw "message"             # same, as a real Booth Radar turn
 """
 
 from __future__ import annotations
@@ -226,13 +227,23 @@ def probe_server() -> None:
             print(f"\033[31mERROR: {e}\033[0m")
 
 
-def probe_raw() -> None:
+def probe_raw(message: str | None = None) -> None:
     """
     Bypass the OpenAI SDK entirely and print every raw SSE line from the server.
     The SDK silently drops non-standard event types (e.g. 'event: thinking').
-    This shows us the true wire format.
+    This shows us the true wire format. With *message*, sends it with the real
+    Booth Radar system prompt so the stream matches a live turn.
     """
     import urllib.request
+    from agent import SYSTEM_PROMPT, _context_prompt
+
+    if message:
+        messages = [
+            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{_context_prompt([])}"},
+            {"role": "user", "content": message},
+        ]
+    else:
+        messages = [{"role": "user", "content": "Think step by step: what is 7 × 8?"}]
 
     base_url = os.getenv("HERMES_BASE_URL") or "http://localhost:8642/v1"
     api_key  = os.getenv("HERMES_API_KEY") or "not-needed"
@@ -241,9 +252,9 @@ def probe_raw() -> None:
 
     payload = json.dumps({
         "model":    model,
-        "messages": [{"role": "user", "content": "Think step by step: what is 7 × 8?"}],
+        "messages": messages,
         "stream":   True,
-        "max_tokens": 300,
+        "max_tokens": 2000 if message else 300,
     }).encode()
 
     req = urllib.request.Request(
@@ -264,7 +275,7 @@ def probe_raw() -> None:
     field_names: set[str] = set()
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=300 if message else 30) as resp:
             for raw_line in resp:
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
                 if not line:
@@ -313,7 +324,7 @@ def main() -> None:
     elif sys.argv[1] == "--probe-server":
         probe_server()
     elif sys.argv[1] == "--probe-raw":
-        probe_raw()
+        probe_raw(sys.argv[2] if len(sys.argv) > 2 else None)
     else:
         scrape_once(sys.argv[1])
 
