@@ -27,7 +27,7 @@ adminRouter.get('/admin/users', requireAdmin, async (_req: Request, res: Respons
     .sort({ lastSeenAt: -1 })
     .toArray();
 
-  const ONLINE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+  const ONLINE_THRESHOLD_MS = 1 * 60 * 1000; // 1 minute
   const now = Date.now();
 
   const users = profiles.map((p) => ({
