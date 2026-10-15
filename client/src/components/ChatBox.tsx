@@ -43,7 +43,7 @@ interface ConversationSummary {
 
 interface ConversationResponse {
   id: string
-  messages: { role: 'user' | 'assistant' | 'thinking'; content: string; attachments?: Attachment[] }[]
+  messages: { role: 'user' | 'assistant' | 'thinking'; content: string; attachments?: Attachment[]; duration?: number }[]
   results: BoothEntry[]
   activeTurnId: string | null
 }
@@ -263,6 +263,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
           role:        m.role as Role,
           text:        m.content,
           attachments: m.attachments,
+          duration:    m.duration,
         })),
       ])
       setResults(c.results)

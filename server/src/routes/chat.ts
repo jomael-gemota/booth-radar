@@ -143,7 +143,7 @@ chatRouter.get('/conversations/:id', async (req: Request, res: Response) => {
   }
   res.json({
     id:          convo._id.toHexString(),
-    messages:    convo.messages.map(({ role, content, attachments }) => ({ role, content, attachments })),
+    messages:    convo.messages.map(({ role, content, attachments, duration }) => ({ role, content, attachments, duration })),
     results:     convo.results,
     activeTurnId: activeTurnFor(req.params.id) ?? null,
   });
