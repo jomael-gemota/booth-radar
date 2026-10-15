@@ -134,7 +134,8 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   const [conversationId,  setConversationId]  = useState<string | null>(null)
   const [turnId,   setTurnId]   = useState<string | null>(null)
   const [results,  setResults]  = useState<BoothEntry[]>([])
-  const [busy,     setBusy]     = useState(false)
+  const [busy,       setBusy]       = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [loadingConv, setLoadingConv] = useState(false)
 
   const bottomRef      = useRef<HTMLDivElement>(null)
@@ -383,6 +384,11 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     }
   }
 
+  // Reset cancelling state whenever the turn ends (busy goes false)
+  useEffect(() => {
+    if (!busy) setCancelling(false)
+  }, [busy])
+
   useStream(turnId, {
     onThinking: handleThinking,
     onToken:    handleToken,
@@ -396,6 +402,10 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     onError: (message) => {
       endTurn()
       addMessage({ id: genId(), role: 'system', text: `❌ ${message}` })
+    },
+    onCancelled: () => {
+      endTurn()
+      addMessage({ id: genId(), role: 'status', text: '⏹ Stopped' })
     },
   })
 
@@ -446,6 +456,16 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     } catch (err) {
       setBusy(false)
       addMessage({ id: genId(), role: 'system', text: `❌ ${(err as Error).message}` })
+    }
+  }
+
+  async function stop() {
+    if (!turnId || cancelling) return
+    setCancelling(true)
+    try {
+      await fetch(`/api/turns/${turnId}/cancel`, { method: 'POST', credentials: 'include' })
+    } catch {
+      // Ignore — the SSE cancelled event will handle cleanup regardless
     }
   }
 
@@ -543,9 +563,28 @@ export default function ChatBox({ user }: { user: AuthUser }) {
             onKeyDown={handleKeyDown}
             autoFocus
           />
-          <button className="send-btn" type="submit" disabled={busy || !input.trim()}>
-            {busy ? <Spinner /> : <SendIcon />}
-          </button>
+          {busy ? (
+            <button
+              className={`send-btn send-btn--stop${cancelling ? ' send-btn--stopping' : ''}`}
+              type="button"
+              disabled={cancelling}
+              onClick={() => void stop()}
+              title="Stop generation"
+              aria-label="Stop generation"
+            >
+              <StopIcon />
+            </button>
+          ) : (
+            <button
+              className="send-btn"
+              type="submit"
+              disabled={!input.trim()}
+              title="Send message"
+              aria-label="Send message"
+            >
+              <SendIcon />
+            </button>
+          )}
         </div>
         <p className="input-hint">
           Booth Radar can make mistakes. Verify important data before use.
@@ -1317,6 +1356,14 @@ function SendIcon() {
   )
 }
 
+function StopIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+      <rect x="4" y="4" width="16" height="16" rx="2.5" />
+    </svg>
+  )
+}
+
 function PlusIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1375,9 +1422,6 @@ function MenuIcon() {
   )
 }
 
-function Spinner() {
-  return <span className="spinner" aria-label="Loading" />
-}
 
 function CopyIcon() {
   return (

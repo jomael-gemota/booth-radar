@@ -19,13 +19,14 @@ interface DonePayload      { reply: string; results: BoothEntry[] }
 interface ErrorPayload     { message: string }
 
 type Handler = {
-  onThinking?: (text: string) => void
-  onToken:    (text: string) => void
-  onStatus:   (text: string) => void
-  onResults:  (results: BoothEntry[]) => void
-  onFile:     (file: Attachment) => void
-  onDone:     (results: BoothEntry[]) => void
-  onError:    (message: string) => void
+  onThinking?:  (text: string) => void
+  onToken:      (text: string) => void
+  onStatus:     (text: string) => void
+  onResults:    (results: BoothEntry[]) => void
+  onFile:       (file: Attachment) => void
+  onDone:       (results: BoothEntry[]) => void
+  onError:      (message: string) => void
+  onCancelled?: () => void
 }
 
 /**
@@ -73,6 +74,11 @@ export function useStream(turnId: string | null, handlers: Handler) {
       } else {
         handlersRef.current.onError('Connection lost')
       }
+    })
+
+    es.addEventListener('cancelled', () => {
+      es.close()
+      handlersRef.current.onCancelled?.()
     })
 
     return () => es.close()

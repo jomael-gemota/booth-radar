@@ -1090,6 +1090,19 @@
   transform: none;
 }
 
+.send-btn--stop {
+  background: #e03e3e;
+}
+
+.send-btn--stop:hover:not(:disabled) {
+  background: #c73333;
+}
+
+.send-btn--stopping {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .input-hint {
   text-align: center;
   font-size: 0.7rem;
