@@ -454,6 +454,28 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     if (conversationId === id) newChat()
   }
 
+  async function renameConversation(id: string, newTitle: string) {
+    const trimmed = newTitle.trim()
+    if (!trimmed) return
+    // Optimistic update
+    setConversations((prev) => {
+      const updated = prev.map((c) => (c.id === id ? { ...c, title: trimmed } : c))
+      saveConversations(user.id, updated)
+      return updated
+    })
+    // Persist to server (non-blocking — optimistic update stays on failure)
+    try {
+      await fetch(`/api/conversations/${id}`, {
+        method:  'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body:    JSON.stringify({ title: trimmed }),
+      })
+    } catch {
+      // Non-critical
+    }
+  }
+
   function pinConversation(id: string, e: React.MouseEvent) {
     e.stopPropagation()
     const updated = conversations.map((c) =>
@@ -561,6 +583,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
                         onSelect={() => void loadConversation(conv.id)}
                         onPin={(e) => pinConversation(conv.id, e)}
                         onDelete={(e) => deleteConversation(conv.id, e)}
+                        onRename={(title) => void renameConversation(conv.id, title)}
                       />
                     ))}
                   </div>
@@ -578,6 +601,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
                         onSelect={() => void loadConversation(conv.id)}
                         onPin={(e) => pinConversation(conv.id, e)}
                         onDelete={(e) => deleteConversation(conv.id, e)}
+                        onRename={(title) => void renameConversation(conv.id, title)}
                       />
                     ))}
                   </div>
@@ -738,17 +762,109 @@ interface ConvItemProps {
   onSelect: () => void
   onPin: (e: React.MouseEvent) => void
   onDelete: (e: React.MouseEvent) => void
+  onRename: (newTitle: string) => void
 }
 
-function ConvItem({ conv, active, onSelect, onPin, onDelete }: ConvItemProps) {
+function ConvItem({ conv, active, onSelect, onPin, onDelete, onRename }: ConvItemProps) {
+  const [editing, setEditing]   = useState(false)
+  const [draft,   setDraft]     = useState(conv.title)
+  const inputRef                = useRef<HTMLInputElement>(null)
+
+  // Keep draft in sync if parent updates the title (e.g. AI rename)
+  useEffect(() => {
+    if (!editing) setDraft(conv.title)
+  }, [conv.title, editing])
+
+  function startEdit(e: React.MouseEvent) {
+    e.stopPropagation()
+    setDraft(conv.title)
+    setEditing(true)
+    // Focus after render
+    setTimeout(() => {
+      inputRef.current?.select()
+    }, 0)
+  }
+
+  function commit() {
+    const trimmed = draft.trim()
+    if (trimmed && trimmed !== conv.title) onRename(trimmed)
+    setEditing(false)
+  }
+
+  function cancel() {
+    setDraft(conv.title)
+    setEditing(false)
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Enter')  { e.preventDefault(); commit() }
+    if (e.key === 'Escape') { e.preventDefault(); cancel() }
+  }
+
+  if (editing) {
+    return (
+      <div className="conv-item conv-item--editing">
+        <input
+          ref={inputRef}
+          className="conv-item-rename-input"
+          value={draft}
+          maxLength={100}
+          autoFocus
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onBlur={commit}
+          onClick={(e) => e.stopPropagation()}
+        />
+        <span className="conv-item-actions conv-item-actions--editing">
+          <span
+            className="conv-item-confirm"
+            role="button"
+            tabIndex={0}
+            onMouseDown={(e) => { e.preventDefault(); commit() }}
+            title="Save"
+            aria-label="Save rename"
+          >
+            <RenameConfirmIcon />
+          </span>
+          <span
+            className="conv-item-cancel"
+            role="button"
+            tabIndex={0}
+            onMouseDown={(e) => { e.preventDefault(); cancel() }}
+            title="Cancel"
+            aria-label="Cancel rename"
+          >
+            ✕
+          </span>
+        </span>
+      </div>
+    )
+  }
+
   return (
     <button
       className={`conv-item${active ? ' conv-item--active' : ''}`}
       onClick={onSelect}
       title={conv.title}
     >
-      <span className="conv-item-title">{conv.title}</span>
+      <span
+        className="conv-item-title"
+        onDoubleClick={startEdit}
+      >
+        {conv.title}
+      </span>
       <span className="conv-item-actions">
+        <span
+          className="conv-item-rename"
+          role="button"
+          tabIndex={0}
+          onClick={startEdit}
+          onKeyDown={(e) => e.key === 'Enter' && startEdit(e as unknown as React.MouseEvent)}
+          title="Rename conversation"
+          aria-label="Rename conversation"
+        >
+          <PencilIcon />
+        </span>
         <span
           className={`conv-item-pin${conv.pinned ? ' conv-item-pin--active' : ''}`}
           role="button"
@@ -1270,6 +1386,25 @@ function ClockIcon() {
       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="10" />
       <polyline points="12 6 12 12 16 14" />
+    </svg>
+  )
+}
+
+function PencilIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+    </svg>
+  )
+}
+
+function RenameConfirmIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
     </svg>
   )
 }

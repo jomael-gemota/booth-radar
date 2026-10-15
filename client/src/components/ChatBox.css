@@ -201,7 +201,7 @@
   line-height: 1.35;
 }
 
-/* ── Conv-item action buttons (pin + delete) ───────────────────────────── */
+/* ── Conv-item action buttons (rename + pin + delete) ──────────────────── */
 
 .conv-item-actions {
   display: flex;
@@ -217,8 +217,16 @@
   opacity: 1;
 }
 
+/* Always show actions while editing */
+.conv-item-actions--editing {
+  opacity: 1 !important;
+}
+
+.conv-item-rename,
 .conv-item-pin,
-.conv-item-delete {
+.conv-item-delete,
+.conv-item-confirm,
+.conv-item-cancel {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -233,6 +241,11 @@
   line-height: 1;
 }
 
+.conv-item-rename:hover {
+  color: var(--text-muted);
+  background: var(--surface-hover);
+}
+
 .conv-item-pin:hover {
   color: var(--accent-hover);
   background: var(--accent-dim);
@@ -244,9 +257,43 @@
   opacity: 1 !important;
 }
 
-.conv-item-delete:hover {
+.conv-item-delete:hover,
+.conv-item-cancel:hover {
   color: var(--error);
   background: rgba(255, 107, 107, 0.12);
+}
+
+.conv-item-confirm:hover {
+  color: #7dba84;
+  background: rgba(125, 186, 132, 0.12);
+}
+
+/* ── Inline rename input ─────────────────────────────────────────────────── */
+
+.conv-item--editing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+  overflow: visible;
+  cursor: default;
+}
+
+.conv-item-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 0.845rem;
+  font-family: inherit;
+  line-height: 1.35;
+  padding: 2px 0;
 }
 
 /* ── Pinned group label icon ─────────────────────────────────────────────── */
