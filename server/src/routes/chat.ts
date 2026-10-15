@@ -2,8 +2,10 @@ import { Router, Request, Response } from 'express';
 import { ObjectId } from 'mongodb';
 import {
   activeTurnFor,
+  cancelTurn,
   conversations,
   files,
+  getTurnConversationId,
   isWorkerConnected,
   startTurn,
   subscribe,
@@ -166,6 +168,29 @@ chatRouter.get('/stream/:turnId', (req: Request, res: Response) => {
   // Keep-alive ping every 20 s
   const ping = setInterval(() => res.write(': ping\n\n'), 20_000);
   res.on('close', () => clearInterval(ping));
+});
+
+// ── POST /api/turns/:turnId/cancel ────────────────────────────────────────
+// Stops an in-flight assistant turn. Immediately closes SSE clients and
+// signals the worker to abort its processing thread.
+chatRouter.post('/turns/:turnId/cancel', async (req: Request, res: Response) => {
+  const userId  = req.user!.id;
+  const turnId  = req.params.turnId;
+
+  const convId = getTurnConversationId(turnId);
+  if (!convId) {
+    res.status(404).json({ error: 'Turn not found or already finished' });
+    return;
+  }
+
+  const convo = await findOwnedConv(convId, userId);
+  if (!convo) {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
+
+  cancelTurn(turnId);
+  res.json({ ok: true });
 });
 
 // ── PATCH /api/conversations/:id ──────────────────────────────────────────

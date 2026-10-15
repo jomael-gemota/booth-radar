@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 from typing import Any
 
 from dotenv import load_dotenv
@@ -25,7 +26,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 import artifacts
-from agent import run_turn
+from agent import TurnCancelled, run_turn
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -40,6 +41,9 @@ RECONNECT_DELAY = 5  # seconds between reconnect attempts
 
 # Strong references so in-flight turn tasks are not garbage-collected
 _running: set[asyncio.Task[None]] = set()
+
+# Cancel events keyed by turnId — set when the server sends a cancel message
+_cancel_events: dict[str, threading.Event] = {}
 
 
 # ── Turn handler ───────────────────────────────────────────────────────────
@@ -68,17 +72,28 @@ async def handle_chat(
         scrubber.flush()
         send(type_, payload)
 
+    # Register a cancel event so the WebSocket loop can signal this thread
+    cancel_event = threading.Event()
+    _cancel_events[turn_id] = cancel_event
+
     out_dir = artifacts.prepare_dir(conversation_id)
     before = artifacts.snapshot(out_dir)
 
     try:
         reply, new_results = await loop.run_in_executor(
-            None, run_turn, messages, results, emit, str(out_dir) if out_dir else None,
+            None, run_turn, messages, results, emit,
+            str(out_dir) if out_dir else None, cancel_event,
         )
+    except TurnCancelled:
+        # Server already broadcast 'cancelled' to SSE clients — nothing more to send
+        log.info("[worker] turn %s cancelled", turn_id)
+        return
     except Exception as exc:
         log.exception("[worker] turn %s failed", turn_id)
         emit("error", {"message": f"Hermes request failed: {exc}"})
         return
+    finally:
+        _cancel_events.pop(turn_id, None)
 
     try:
         files = await loop.run_in_executor(None, artifacts.collect, out_dir, before, reply)
@@ -120,8 +135,20 @@ async def run() -> None:
                             log.warning("[worker] received non-JSON frame: %r", raw)
                             continue
 
-                        if msg.get("type") != "chat":
-                            log.warning("[worker] unknown message type: %s", msg.get("type"))
+                        msg_type = msg.get("type")
+
+                        if msg_type == "cancel":
+                            turn_id = msg.get("turnId")
+                            event = _cancel_events.get(turn_id) if turn_id else None
+                            if event:
+                                log.info("[worker] cancelling turn %s", turn_id)
+                                event.set()
+                            else:
+                                log.debug("[worker] cancel for unknown/finished turn %s", turn_id)
+                            continue
+
+                        if msg_type != "chat":
+                            log.warning("[worker] unknown message type: %s", msg_type)
                             continue
 
                         turn_id  = msg.get("turnId")

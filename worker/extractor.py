@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from typing import Callable, Optional
 
 from openai import OpenAI
@@ -112,6 +113,7 @@ def chat_stream(
     messages: list[dict[str, str]],
     on_token: Optional[Callable[[str], None]] = None,
     on_thinking: Optional[Callable[[str], None]] = None,
+    cancel: Optional["threading.Event"] = None,
 ) -> str:
     """
     Run a streaming chat completion using raw HTTP so that custom SSE event
@@ -176,6 +178,8 @@ def chat_stream(
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             for raw_line in resp:
+                if cancel and cancel.is_set():
+                    break
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
 
                 if not line:

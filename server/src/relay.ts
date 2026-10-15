@@ -54,7 +54,7 @@ export interface ConversationDoc {
   results: BoothEntry[];
 }
 
-type WorkerEventType = 'thinking' | 'token' | 'status' | 'results' | 'file' | 'done' | 'error';
+type WorkerEventType = 'thinking' | 'token' | 'status' | 'results' | 'file' | 'done' | 'error' | 'cancelled';
 
 interface WorkerMessage {
   turnId: string;
@@ -137,7 +137,7 @@ function broadcast(turnId: string, turn: Turn, type: WorkerEventType, payload: u
   turn.events.push(frame);
   for (const res of turn.clients) res.write(frame);
 
-  if (type === 'done' || type === 'error') {
+  if (type === 'done' || type === 'error' || type === 'cancelled') {
     turn.finished = true;
     activeTurns.delete(turn.conversationId.toHexString());
     for (const res of turn.clients) res.end();
@@ -165,6 +165,7 @@ export function subscribe(turnId: string, res: Response): boolean {
 // ── Persistence ────────────────────────────────────────────────────────────
 
 async function persist(turn: Turn, type: WorkerEventType, payload: unknown): Promise<void> {
+  if (type === 'cancelled') return; // turn was aborted — nothing to save
   const col = conversations();
   if (type === 'thinking') {
     // Accumulate in-memory only — no DB write per chunk
@@ -229,6 +230,29 @@ function acceptFile(turn: Turn, payload: WorkerFilePayload): Attachment | null {
       }),
   );
   return attachment;
+}
+
+// ── Cancel API ────────────────────────────────────────────────────────────
+
+/** Returns the conversationId hex string for an active turn, or null. */
+export function getTurnConversationId(turnId: string): string | null {
+  return turns.get(turnId)?.conversationId.toHexString() ?? null;
+}
+
+/**
+ * Immediately closes all SSE clients for the turn and signals the worker to
+ * stop. Returns false if the turn is unknown or already finished.
+ */
+export function cancelTurn(turnId: string): boolean {
+  const turn = turns.get(turnId);
+  if (!turn || turn.finished) return false;
+  // Signal the worker process to stop its thread
+  if (workerSocket && workerSocket.readyState === WebSocket.OPEN) {
+    workerSocket.send(JSON.stringify({ type: 'cancel', turnId }));
+  }
+  // Close SSE clients immediately
+  broadcast(turnId, turn, 'cancelled', {});
+  return true;
 }
 
 // ── Worker socket ──────────────────────────────────────────────────────────

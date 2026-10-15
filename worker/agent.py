@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
@@ -28,6 +29,10 @@ HISTORY_CONTEXT_ROWS = 200
 
 Emit = Callable[[str, dict[str, Any]], None]
 Row = dict[str, str]
+
+
+class TurnCancelled(Exception):
+    """Raised inside run_turn() when the cancel event is set."""
 
 TOOL_OPEN = "<tool>"
 _TOOL_RE = re.compile(r"<tool>\s*(.*?)\s*(?:</tool>|$)", re.DOTALL)
@@ -315,10 +320,13 @@ def run_turn(
     results: list[Row],
     emit: Emit,
     output_dir: str | None = None,
+    cancel: threading.Event | None = None,
 ) -> tuple[str, list[Row]]:
     """
     Run one assistant turn over *history* (user/assistant messages, last one
     from the user). Returns (reply_text, updated_results).
+
+    Raises TurnCancelled if *cancel* is set before or between steps.
     """
     results = [dict(r) for r in results]
     system = f"{SYSTEM_PROMPT}{_output_prompt(output_dir)}\n\n{_context_prompt(results)}"
@@ -329,13 +337,20 @@ def run_turn(
     reply_parts: list[str] = []
 
     for step in range(AGENT_MAX_STEPS):
+        if cancel and cancel.is_set():
+            raise TurnCancelled()
+
         filt = _ToolBlockFilter(lambda t: emit("token", {"text": t}))
         text = chat_stream(
             convo,
             on_token=filt.feed,
             on_thinking=lambda t: emit("thinking", {"text": t}),
+            cancel=cancel,
         )
         filt.flush()
+
+        if cancel and cancel.is_set():
+            raise TurnCancelled()
 
         idx = text.find(TOOL_OPEN)
         visible = (text if idx == -1 else text[:idx]).strip()
@@ -361,10 +376,15 @@ def run_turn(
             log.info("[agent] step %d tool=%s args=%s", step + 1, name, args)
             try:
                 observation = _run_tool(name, args, results, emit)
+            except TurnCancelled:
+                raise
             except Exception as exc:
                 log.warning("[agent] tool %s failed: %s", name, exc)
                 observation = f"Error: {name} failed: {exc}"
                 emit("status", {"text": f"⚠️ {name} failed: {exc}"})
+
+        if cancel and cancel.is_set():
+            raise TurnCancelled()
 
         convo.append({
             "role": "user",
