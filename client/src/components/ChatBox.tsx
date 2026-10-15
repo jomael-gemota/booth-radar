@@ -15,6 +15,7 @@ interface Message {
   text: string
   streaming?: boolean
   attachments?: Attachment[]
+  duration?: number   // ms elapsed from send → turn complete
 }
 
 interface ConversationSummary {
@@ -113,9 +114,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   // Active conversation
   const [messages,        setMessages]        = useState<Message[]>([WELCOME])
   const [input,           setInput]           = useState('')
-  const [conversationId,  setConversationId]  = useState<string | null>(
-    () => localStorage.getItem(activeConvKey(user.id)),
-  )
+  const [conversationId,  setConversationId]  = useState<string | null>(null)
   const [turnId,   setTurnId]   = useState<string | null>(null)
   const [results,  setResults]  = useState<BoothEntry[]>([])
   const [busy,     setBusy]     = useState(false)
@@ -125,6 +124,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   const streamingMsgId = useRef<string | null>(null)
   const thinkingMsgId  = useRef<string | null>(null)
   const inputRef       = useRef<HTMLTextAreaElement>(null)
+  const turnStartRef   = useRef<number | null>(null)
 
   // ── Auto-resize textarea ───────────────────────────────────────────────
   useEffect(() => {
@@ -220,13 +220,8 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   }, [profileMenuOpen])
 
   // ── Restore active conversation on mount ───────────────────────────────
-
-  useEffect(() => {
-    const saved = localStorage.getItem(activeConvKey(user.id))
-    if (!saved) return
-    void loadConversation(saved, true)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []) // intentionally runs once on mount — loadConversation is stable, user.id is immutable
+  // Intentionally not restoring the last conversation on login — users always
+  // land on the New Chat UI. They can resume a previous conversation from the sidebar.
 
   // ── Auto-scroll ────────────────────────────────────────────────────────
 
@@ -261,6 +256,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       if (c.activeTurnId) {
         setBusy(true)
         setTurnId(c.activeTurnId)
+        turnStartRef.current = Date.now()
       }
     } catch {
       if (onMount) {
@@ -292,14 +288,18 @@ export default function ChatBox({ user }: { user: AuthUser }) {
 
   // ── Stream handlers ────────────────────────────────────────────────────
 
-  function finishStreaming() {
+  function finishStreaming(duration?: number) {
     const id = streamingMsgId.current
     streamingMsgId.current = null
     if (id) {
       setMessages((prev) =>
         prev
           .filter((m) => m.id !== id || m.text.trim() !== '' || m.attachments?.length)
-          .map((m) => (m.id === id ? { ...m, streaming: false } : m)),
+          .map((m) =>
+            m.id === id
+              ? { ...m, streaming: false, ...(duration != null ? { duration } : {}) }
+              : m,
+          ),
       )
     }
     const tid = thinkingMsgId.current
@@ -353,7 +353,9 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   }
 
   function endTurn() {
-    finishStreaming()
+    const elapsed = turnStartRef.current != null ? Date.now() - turnStartRef.current : undefined
+    turnStartRef.current = null
+    finishStreaming(elapsed)
     setBusy(false)
     setTurnId(null)
     // Generate a proper title for the first turn of a new conversation
@@ -408,6 +410,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       conversationIdRef.current = body.conversationId
       localStorage.setItem(activeConvKey(user.id), body.conversationId)
       setTurnId(body.turnId)
+      turnStartRef.current = Date.now()
 
       // Track in sidebar — add if it's a brand-new conversation
       if (!conversations.find((c) => c.id === body.conversationId)) {
@@ -449,6 +452,28 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     setConversations(updated)
     saveConversations(user.id, updated)
     if (conversationId === id) newChat()
+  }
+
+  async function renameConversation(id: string, newTitle: string) {
+    const trimmed = newTitle.trim()
+    if (!trimmed) return
+    // Optimistic update
+    setConversations((prev) => {
+      const updated = prev.map((c) => (c.id === id ? { ...c, title: trimmed } : c))
+      saveConversations(user.id, updated)
+      return updated
+    })
+    // Persist to server (non-blocking — optimistic update stays on failure)
+    try {
+      await fetch(`/api/conversations/${id}`, {
+        method:  'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body:    JSON.stringify({ title: trimmed }),
+      })
+    } catch {
+      // Non-critical
+    }
   }
 
   function pinConversation(id: string, e: React.MouseEvent) {
@@ -558,6 +583,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
                         onSelect={() => void loadConversation(conv.id)}
                         onPin={(e) => pinConversation(conv.id, e)}
                         onDelete={(e) => deleteConversation(conv.id, e)}
+                        onRename={(title) => void renameConversation(conv.id, title)}
                       />
                     ))}
                   </div>
@@ -575,6 +601,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
                         onSelect={() => void loadConversation(conv.id)}
                         onPin={(e) => pinConversation(conv.id, e)}
                         onDelete={(e) => deleteConversation(conv.id, e)}
+                        onRename={(title) => void renameConversation(conv.id, title)}
                       />
                     ))}
                   </div>
@@ -735,17 +762,109 @@ interface ConvItemProps {
   onSelect: () => void
   onPin: (e: React.MouseEvent) => void
   onDelete: (e: React.MouseEvent) => void
+  onRename: (newTitle: string) => void
 }
 
-function ConvItem({ conv, active, onSelect, onPin, onDelete }: ConvItemProps) {
+function ConvItem({ conv, active, onSelect, onPin, onDelete, onRename }: ConvItemProps) {
+  const [editing, setEditing]   = useState(false)
+  const [draft,   setDraft]     = useState(conv.title)
+  const inputRef                = useRef<HTMLInputElement>(null)
+
+  // Keep draft in sync if parent updates the title (e.g. AI rename)
+  useEffect(() => {
+    if (!editing) setDraft(conv.title)
+  }, [conv.title, editing])
+
+  function startEdit(e: React.MouseEvent) {
+    e.stopPropagation()
+    setDraft(conv.title)
+    setEditing(true)
+    // Focus after render
+    setTimeout(() => {
+      inputRef.current?.select()
+    }, 0)
+  }
+
+  function commit() {
+    const trimmed = draft.trim()
+    if (trimmed && trimmed !== conv.title) onRename(trimmed)
+    setEditing(false)
+  }
+
+  function cancel() {
+    setDraft(conv.title)
+    setEditing(false)
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Enter')  { e.preventDefault(); commit() }
+    if (e.key === 'Escape') { e.preventDefault(); cancel() }
+  }
+
+  if (editing) {
+    return (
+      <div className="conv-item conv-item--editing">
+        <input
+          ref={inputRef}
+          className="conv-item-rename-input"
+          value={draft}
+          maxLength={100}
+          autoFocus
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onBlur={commit}
+          onClick={(e) => e.stopPropagation()}
+        />
+        <span className="conv-item-actions conv-item-actions--editing">
+          <span
+            className="conv-item-confirm"
+            role="button"
+            tabIndex={0}
+            onMouseDown={(e) => { e.preventDefault(); commit() }}
+            title="Save"
+            aria-label="Save rename"
+          >
+            <RenameConfirmIcon />
+          </span>
+          <span
+            className="conv-item-cancel"
+            role="button"
+            tabIndex={0}
+            onMouseDown={(e) => { e.preventDefault(); cancel() }}
+            title="Cancel"
+            aria-label="Cancel rename"
+          >
+            ✕
+          </span>
+        </span>
+      </div>
+    )
+  }
+
   return (
     <button
       className={`conv-item${active ? ' conv-item--active' : ''}`}
       onClick={onSelect}
       title={conv.title}
     >
-      <span className="conv-item-title">{conv.title}</span>
+      <span
+        className="conv-item-title"
+        onDoubleClick={startEdit}
+      >
+        {conv.title}
+      </span>
       <span className="conv-item-actions">
+        <span
+          className="conv-item-rename"
+          role="button"
+          tabIndex={0}
+          onClick={startEdit}
+          onKeyDown={(e) => e.key === 'Enter' && startEdit(e as unknown as React.MouseEvent)}
+          title="Rename conversation"
+          aria-label="Rename conversation"
+        >
+          <PencilIcon />
+        </span>
         <span
           className={`conv-item-pin${conv.pinned ? ' conv-item-pin--active' : ''}`}
           role="button"
@@ -870,6 +989,12 @@ function MessageBubble({ msg, conversationId, hasResults }: MessageBubbleProps) 
         )}
         {!msg.streaming && msg.text.trim() && (
           <div className="msg-actions">
+            {msg.duration != null && (
+              <span className="msg-duration" title="Time to respond">
+                <ClockIcon />
+                {formatDuration(msg.duration)}
+              </span>
+            )}
             <CopyButton text={msg.text} />
             {conversationId && hasResults && (
               <ExportCsvButton conversationId={conversationId} />
@@ -879,6 +1004,13 @@ function MessageBubble({ msg, conversationId, hasResults }: MessageBubbleProps) 
       </div>
     </div>
   )
+}
+
+// ── Duration formatting ───────────────────────────────────────────────────────
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
 }
 
 // ── Markdown rendering ───────────────────────────────────────────────────────
@@ -929,12 +1061,31 @@ function MessageContent({ text, streaming }: { text: string; streaming?: boolean
 // ── ThinkingBubble ───────────────────────────────────────────────────────────
 
 function ThinkingBubble({ text, streaming }: { text: string; streaming?: boolean }) {
-  // Auto-expand while streaming; collapse (but keep accessible) once done
-  const [expanded, setExpanded] = useState(!!streaming)
+  // Always start collapsed — user can expand manually
+  const [expanded, setExpanded]       = useState(false)
+  const [displayLine, setDisplayLine] = useState('')
+  // Bumped only when a brand-new line starts → re-mounts the span → CSS animation fires
+  const [lineKey, setLineKey]         = useState(0)
+  const prevLineCountRef              = useRef(0)
 
+  // Keep the collapsed preview updated and animate on new lines
   useEffect(() => {
-    if (streaming) setExpanded(true)
-    else           setExpanded(false)
+    if (!streaming) return
+    const lines  = text.split('\n').map((s) => s.trim()).filter(Boolean)
+    const latest = lines.at(-1) ?? ''
+    const count  = lines.length
+
+    if (count > prevLineCountRef.current) {
+      // A new line just started — trigger the slide-in animation
+      setLineKey((k) => k + 1)
+      prevLineCountRef.current = count
+    }
+    setDisplayLine(latest)
+  }, [text, streaming])
+
+  // Reset counter when a turn ends so the next turn starts fresh
+  useEffect(() => {
+    if (!streaming) prevLineCountRef.current = 0
   }, [streaming])
 
   return (
@@ -947,7 +1098,18 @@ function ThinkingBubble({ text, streaming }: { text: string; streaming?: boolean
       >
         <span className={`thinking-orb${streaming ? ' thinking-orb--pulse' : ''}`} />
         <span className="thinking-label">
-          {streaming ? 'Thinking…' : 'View reasoning'}
+          {streaming && !expanded ? (
+            // Collapsed while streaming: live preview of the current line
+            <span key={lineKey} className="thinking-preview">
+              {displayLine || 'Thinking…'}
+            </span>
+          ) : streaming ? (
+            // Expanded while streaming
+            'Thinking…'
+          ) : (
+            // Done
+            'View reasoning'
+          )}
         </span>
         <span className="thinking-chevron" aria-hidden>
           <ChevronDownIcon />
@@ -1244,6 +1406,35 @@ function AccountIcon() {
       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
       <circle cx="12" cy="7" r="4" />
+    </svg>
+  )
+}
+
+function ClockIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
+  )
+}
+
+function PencilIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+    </svg>
+  )
+}
+
+function RenameConfirmIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
     </svg>
   )
 }

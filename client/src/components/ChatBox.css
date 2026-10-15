@@ -201,7 +201,7 @@
   line-height: 1.35;
 }
 
-/* ── Conv-item action buttons (pin + delete) ───────────────────────────── */
+/* ── Conv-item action buttons (rename + pin + delete) ──────────────────── */
 
 .conv-item-actions {
   display: flex;
@@ -217,8 +217,16 @@
   opacity: 1;
 }
 
+/* Always show actions while editing */
+.conv-item-actions--editing {
+  opacity: 1 !important;
+}
+
+.conv-item-rename,
 .conv-item-pin,
-.conv-item-delete {
+.conv-item-delete,
+.conv-item-confirm,
+.conv-item-cancel {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -233,6 +241,11 @@
   line-height: 1;
 }
 
+.conv-item-rename:hover {
+  color: var(--text-muted);
+  background: var(--surface-hover);
+}
+
 .conv-item-pin:hover {
   color: var(--accent-hover);
   background: var(--accent-dim);
@@ -244,9 +257,43 @@
   opacity: 1 !important;
 }
 
-.conv-item-delete:hover {
+.conv-item-delete:hover,
+.conv-item-cancel:hover {
   color: var(--error);
   background: rgba(255, 107, 107, 0.12);
+}
+
+.conv-item-confirm:hover {
+  color: #7dba84;
+  background: rgba(125, 186, 132, 0.12);
+}
+
+/* ── Inline rename input ─────────────────────────────────────────────────── */
+
+.conv-item--editing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+  overflow: visible;
+  cursor: default;
+}
+
+.conv-item-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 0.845rem;
+  font-family: inherit;
+  line-height: 1.35;
+  padding: 2px 0;
 }
 
 /* ── Pinned group label icon ─────────────────────────────────────────────── */
@@ -567,8 +614,9 @@
 }
 
 .thinking-header {
-  display: inline-flex;
+  display: flex;
   align-items: center;
+  width: 100%;
   gap: 8px;
   padding: 3px 0;
   background: transparent;
@@ -582,6 +630,7 @@
   transition: color 0.15s;
   user-select: none;
   border-radius: 4px;
+  overflow: hidden;
 }
 
 .thinking-header:hover {
@@ -617,8 +666,24 @@
 
 .thinking-label {
   flex: 1;
+  min-width: 0;
   font-weight: 400;
   letter-spacing: 0.01em;
+  overflow: hidden;
+}
+
+/* Live preview line shown while collapsed + streaming */
+.thinking-preview {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: thinking-line-in 0.18s ease;
+}
+
+@keyframes thinking-line-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0);   }
 }
 
 .thinking-chevron {
@@ -718,6 +783,39 @@
 }
 
 .msg-actions .copy-btn + .copy-btn::before {
+  content: '';
+  position: absolute;
+  left: -3px;
+  top: 20%;
+  height: 60%;
+  width: 1px;
+  background: var(--border);
+  border-radius: 1px;
+}
+
+/* ── Response duration label ─────────────────────────────────────────────── */
+
+.msg-duration {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 6px;
+  font-size: 0.71rem;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  user-select: none;
+  margin-right: 2px;
+  opacity: 0.75;
+}
+
+/* Separator after the duration label, before the first copy button */
+.msg-duration + .copy-btn {
+  position: relative;
+  margin-left: 2px;
+}
+
+.msg-duration + .copy-btn::before {
   content: '';
   position: absolute;
   left: -3px;
