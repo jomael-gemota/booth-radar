@@ -12,10 +12,12 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
+import page_cache
 from extractor import chat_stream, extract
-from scraper import scrape, snapshot
+from scraper import SCRAPE_CONCURRENCY, load_page, scrape
 
 log = logging.getLogger(__name__)
 
@@ -83,14 +85,20 @@ one block and STOP:
 <tool>{{"name": "<tool name>", "args": {{...}}}}</tool>
 
 Available tools:
-- fetch_page  {{"url": "https://..."}}
+- fetch_page  {{"url": "https://...", "offset": 0, "refresh": false}}
     Loads a page in a headless browser and returns its visible text and links.
     Use it to understand a site, find the exhibitor directory, and discover
-    pagination or A–Z letter pages before extracting.
-- extract_booths  {{"urls": ["https://...", ...]}}
+    pagination or A–Z letter pages before extracting. Long pages are cut at
+    {AGENT_PAGE_CHARS:,} chars; pass "offset" to read further.
+- extract_booths  {{"urls": ["https://...", ...], "refresh": false}}
     Scrapes each URL and extracts every exhibitor brand + booth. Rows are added
     to the results table the user can export as CSV (duplicates are skipped).
     Max {MAX_URLS_PER_CALL} URLs per call; call it again for more.
+
+Pages loaded in the last hour are cached and return instantly. To answer
+follow-up questions about a site (other details on a page, a page you already
+looked at), call fetch_page again instead of guessing. Only set "refresh": true
+when the user asks for fresh or updated data.
 - clear_results  {{}}
     Empties the results table.
 
@@ -160,20 +168,50 @@ def _row_key(row: Row) -> tuple[str, str]:
     return row["brand"].casefold(), row["booth"].casefold()
 
 
+def _flag(args: dict[str, Any], name: str) -> bool:
+    value = args.get(name)
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
+
+
 def _tool_fetch_page(args: dict[str, Any], emit: Emit) -> str:
     url = str(args.get("url", "")).strip()
     if not url:
         return "Error: 'url' is required."
+    try:
+        offset = max(0, int(args.get("offset") or 0))
+    except (TypeError, ValueError):
+        return "Error: 'offset' must be a whole number."
+    refresh = _flag(args, "refresh")
+
     emit("status", {"text": f"🔍 Loading {url}"})
-    text, links = snapshot(url)
-    shown = text[:AGENT_PAGE_CHARS]
-    note = f" (showing first {AGENT_PAGE_CHARS:,})" if len(text) > AGENT_PAGE_CHARS else ""
+    text, links, cached = load_page(url, refresh)
+    shown = text[offset:offset + AGENT_PAGE_CHARS]
+    end = offset + len(shown)
+    note = ""
+    if offset or end < len(text):
+        more = f"; pass offset={end} for more" if end < len(text) else ""
+        note = f" (showing chars {offset:,}–{end:,}{more})"
+    source = " (from cache)" if cached else ""
     link_lines = "\n".join(f"- {label or '(no text)'} -> {href}" for label, href in links)
     return (
-        f"URL: {url}\nVisible text: {len(text):,} chars{note}\n\n"
+        f"URL: {url}{source}\nVisible text: {len(text):,} chars{note}\n\n"
         f"--- TEXT ---\n{shown}\n--- END TEXT ---\n\n"
         f"--- LINKS ({len(links)}) ---\n{link_lines}\n--- END LINKS ---"
     )
+
+
+def _extract_url(url: str, refresh: bool) -> list[Row]:
+    text = scrape(url, refresh)
+    key = (page_cache.url_key(url), page_cache.text_hash(text))
+    rows = None if refresh else page_cache.extractions.get(key)
+    if rows is None:
+        rows = extract(text, url)
+        page_cache.extractions.set(key, rows)
+    else:
+        log.info("[agent] extraction cache hit for %s", url)
+    return [dict(r) for r in rows]
 
 
 def _tool_extract_booths(args: dict[str, Any], results: list[Row], emit: Emit) -> str:
@@ -183,28 +221,53 @@ def _tool_extract_booths(args: dict[str, Any], results: list[Row], emit: Emit) -
     if not isinstance(urls, list) or not urls:
         return "Error: 'urls' must be a non-empty list of URLs."
     urls = [str(u).strip() for u in urls if str(u).strip()]
+    if not urls:
+        return "Error: 'urls' must be a non-empty list of URLs."
     skipped = urls[MAX_URLS_PER_CALL:]
     urls = urls[:MAX_URLS_PER_CALL]
+    refresh = _flag(args, "refresh")
 
     existing = {_row_key(r) for r in results}
     lines: list[str] = []
-    for i, url in enumerate(urls, 1):
-        emit("status", {"text": f"📄 Extracting {i}/{len(urls)}: {url}"})
-        try:
-            rows = extract(scrape(url), url)
-        except Exception as exc:
-            log.warning("[agent] extract failed for %s: %s", url, exc)
-            lines.append(f"- {url}: FAILED ({exc})")
-            continue
-        added = 0
-        for row in rows:
-            key = _row_key(row)
-            if key not in existing:
-                existing.add(key)
-                results.append(row)
-                added += 1
-        lines.append(f"- {url}: {len(rows)} rows found, {added} new")
-        emit("results", {"results": list(results)})
+    outcomes: dict[int, list[Row] | Exception] = {}
+    next_to_merge = 0
+
+    def merge_ready() -> None:
+        # Merge in URL order so de-duplication matches sequential processing.
+        nonlocal next_to_merge
+        while next_to_merge in outcomes:
+            url, outcome = urls[next_to_merge], outcomes.pop(next_to_merge)
+            next_to_merge += 1
+            if isinstance(outcome, Exception):
+                lines.append(f"- {url}: FAILED ({outcome})")
+                continue
+            added = 0
+            for row in outcome:
+                key = _row_key(row)
+                if key not in existing:
+                    existing.add(key)
+                    results.append(row)
+                    added += 1
+            lines.append(f"- {url}: {len(outcome)} rows found, {added} new")
+
+    emit("status", {"text": f"📄 Extracting {len(urls)} page{'s' if len(urls) != 1 else ''}…"})
+    with ThreadPoolExecutor(max_workers=min(SCRAPE_CONCURRENCY, len(urls))) as pool:
+        futures: dict[Future[list[Row]], int] = {
+            pool.submit(_extract_url, url, refresh): i for i, url in enumerate(urls)
+        }
+        for done, future in enumerate(as_completed(futures), 1):
+            i = futures[future]
+            try:
+                outcomes[i] = future.result()
+                emit("status", {"text": f"📄 Extracted {done}/{len(urls)}: {urls[i]}"})
+            except Exception as exc:
+                log.warning("[agent] extract failed for %s: %s", urls[i], exc)
+                outcomes[i] = exc
+                emit("status", {"text": f"⚠️ Failed {done}/{len(urls)}: {urls[i]}"})
+            before = len(results)
+            merge_ready()
+            if len(results) != before:
+                emit("results", {"results": list(results)})
 
     if skipped:
         lines.append(f"Not processed (over the {MAX_URLS_PER_CALL}-URL limit): {len(skipped)} URLs")

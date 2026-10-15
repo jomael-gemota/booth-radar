@@ -5,21 +5,49 @@ Strategy:
   1. Try Playwright (headless Chromium) to handle JS-rendered SPAs.
   2. If the resulting text is too short (< MIN_TEXT_LEN chars),
      fall back to requests + BeautifulSoup for static pages.
+
+Pages are loaded on a shared pool of SCRAPE_CONCURRENCY threads, each keeping a
+warm Chromium, and results are cached in page_cache.pages.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 from urllib.parse import urljoin, urldefrag
 
 import requests
 from bs4 import BeautifulSoup
 
+import page_cache
+
 log = logging.getLogger(__name__)
 
 MIN_TEXT_LEN = 200  # chars; below this, try the requests fallback
 MAX_LINKS = 150
+SCRAPE_CONCURRENCY     = max(1, int(os.getenv("SCRAPE_CONCURRENCY", "4")))
+SCRAPE_IDLE_TIMEOUT_MS = int(os.getenv("SCRAPE_IDLE_TIMEOUT_MS", "8000"))
+
+_BLOCKED_RESOURCES = {"image", "media", "font"}
+
+# Playwright's sync API is bound to the thread that started it, so each pool
+# thread owns its own Playwright instance and browser.
+_local = threading.local()
+
+
+def _mark_pool_thread() -> None:
+    _local.in_pool = True
+
+
+_pool = ThreadPoolExecutor(
+    max_workers=SCRAPE_CONCURRENCY,
+    thread_name_prefix="scrape",
+    initializer=_mark_pool_thread,
+)
 
 # Tags whose text we always strip (navigation chrome, boilerplate)
 _NOISE_TAGS = {"script", "style", "noscript", "header", "footer", "nav", "iframe"}
@@ -64,26 +92,63 @@ def _fetch_requests(url: str) -> str:
     return resp.text
 
 
-def _fetch_playwright(url: str) -> str:
-    """Use Playwright (sync API) for JS-rendered pages."""
+def _browser() -> Any:
+    """Return this thread's Chromium, launching it on first use or after a crash."""
+    browser = getattr(_local, "browser", None)
+    if browser is not None and browser.is_connected():
+        return browser
     # Import here so the worker can still start if Playwright is not installed;
     # callers should handle ImportError.
     from playwright.sync_api import sync_playwright  # type: ignore
+
+    if getattr(_local, "playwright", None) is None:
+        _local.playwright = sync_playwright().start()
+    log.info("[scraper] launching Chromium on %s", threading.current_thread().name)
+    _local.browser = _local.playwright.chromium.launch(headless=True)
+    return _local.browser
+
+
+def _block_heavy_assets(route: Any) -> None:
+    if route.request.resource_type in _BLOCKED_RESOURCES:
+        route.abort()
+    else:
+        route.continue_()
+
+
+def _render(url: str) -> str:
     from playwright.sync_api import TimeoutError as PlaywrightTimeout  # type: ignore
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+    context = _browser().new_context()
+    try:
+        context.route("**/*", _block_heavy_assets)
+        page = context.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
         try:
-            page = browser.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=15_000)
-            except PlaywrightTimeout:
-                # Sites with constant polling never go idle; use what has rendered.
-                log.info("[scraper] networkidle timed out for %s, using current DOM", url)
-            return page.content()
-        finally:
-            browser.close()
+            page.wait_for_load_state("networkidle", timeout=SCRAPE_IDLE_TIMEOUT_MS)
+        except PlaywrightTimeout:
+            # Sites with constant polling never go idle; use what has rendered.
+            log.info("[scraper] networkidle timed out for %s, using current DOM", url)
+        return page.content()
+    finally:
+        try:
+            context.close()
+        except Exception:
+            pass
+
+
+def _fetch_playwright(url: str) -> str:
+    """Use Playwright (sync API) for JS-rendered pages."""
+    try:
+        return _render(url)
+    except ImportError:
+        raise
+    except Exception:
+        browser = getattr(_local, "browser", None)
+        if browser is not None and browser.is_connected():
+            raise
+        log.warning("[scraper] Chromium disconnected, relaunching for %s", url)
+        _local.browser = None
+        return _render(url)
 
 
 def fetch_html(url: str) -> str:
@@ -125,16 +190,41 @@ def fetch_html(url: str) -> str:
     return html
 
 
-def scrape(url: str) -> str:
-    """Scrape *url* and return clean visible text."""
-    text = _clean(BeautifulSoup(fetch_html(url), "html.parser"))
-    if not text.strip():
-        raise RuntimeError("Scraping returned empty content")
-    return text
-
-
-def snapshot(url: str) -> tuple[str, list[tuple[str, str]]]:
-    """Scrape *url* and return (visible_text, links)."""
+def _load(url: str) -> tuple[str, list[tuple[str, str]]]:
     soup = BeautifulSoup(fetch_html(url), "html.parser")
     links = _links(soup, url)
-    return _clean(soup), links
+    text = _clean(soup)
+    if not text.strip():
+        raise RuntimeError("Scraping returned empty content")
+    return text, links
+
+
+def load_page(url: str, refresh: bool = False) -> tuple[str, list[tuple[str, str]], bool]:
+    """
+    Return (visible_text, links, from_cache) for *url*, serving recently
+    loaded pages from the cache unless *refresh* is set.
+    """
+    key = page_cache.url_key(url)
+    if not refresh:
+        cached = page_cache.pages.get(key)
+        if cached is not None:
+            log.info("[scraper] cache hit for %s", key)
+            return cached[0], cached[1], True
+
+    if getattr(_local, "in_pool", False):
+        text, links = _load(key)
+    else:
+        text, links = _pool.submit(_load, key).result()
+    page_cache.pages.set(key, (text, links))
+    return text, links, False
+
+
+def scrape(url: str, refresh: bool = False) -> str:
+    """Scrape *url* and return clean visible text."""
+    return load_page(url, refresh)[0]
+
+
+def snapshot(url: str, refresh: bool = False) -> tuple[str, list[tuple[str, str]]]:
+    """Scrape *url* and return (visible_text, links)."""
+    text, links, _ = load_page(url, refresh)
+    return text, links

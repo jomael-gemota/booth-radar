@@ -126,6 +126,15 @@ For a systemd unit without `User=` (runs as root):
 sudo .venv/bin/playwright install --with-deps chromium
 ```
 
+### Scraping speed and cache
+
+Pages are rendered on a pool of `SCRAPE_CONCURRENCY` threads (default 4), each keeping
+a warm Chromium, with images, media and fonts blocked. `extract_booths` processes up to
+`SCRAPE_CONCURRENCY` pages at once. Scraped pages and their extracted rows are cached in
+worker memory for `PAGE_CACHE_TTL` seconds (default 3600, up to `PAGE_CACHE_MAX` entries),
+so follow-up questions about a site are answered without re-scraping. The cache is
+cleared when the worker restarts; set `PAGE_CACHE_TTL=0` to disable it.
+
 ### File downloads
 
 Files Hermes creates during a turn (CSV, XLSX, JSON, TXT, MD, up to 10 MB, max 5 per
