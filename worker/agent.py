@@ -17,12 +17,14 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 import page_cache
-from extractor import chat_stream, extract
+from extractor import chat_stream, extract, quick_completion
 from scraper import SCRAPE_CONCURRENCY, load_page, scrape
 
 log = logging.getLogger(__name__)
 
 AGENT_MAX_STEPS      = int(os.getenv("AGENT_MAX_STEPS", "12"))
+ACK_WAIT_SECONDS     = float(os.getenv("ACK_WAIT_SECONDS", "4"))
+ACK_HISTORY_MESSAGES = 6
 AGENT_PAGE_CHARS     = int(os.getenv("AGENT_PAGE_CHARS", "12000"))
 MAX_URLS_PER_CALL    = int(os.getenv("MAX_URLS_PER_CALL", "40"))
 HISTORY_CONTEXT_ROWS = 200
@@ -316,6 +318,57 @@ def _preamble_for(name: str, args: dict[str, Any]) -> str:
     return "Give me a moment while I work on that 🔍"
 
 
+ACK_PROMPT = """\
+You are Booth Radar, a warm, upbeat assistant that collects exhibitor brands and
+booth numbers from trade-show websites. The user just sent the last message below
+and you are about to start working on it (for example opening a page or
+extracting booths).
+
+Write what you say to the user right before you start: one or two short sentences
+that respond to what they actually said and tell them specifically what you are
+about to do first. Sound like an enthusiastic teammate; at most one emoji.
+
+Do not claim any results, do not ask questions, and do not mention tools, code,
+servers or files. Output only the message."""
+
+
+class _Acknowledgement:
+    """
+    Generates a request-specific opening line in the background so it is ready
+    if Hermes starts acting before it says anything. Used at most once per turn.
+    """
+
+    def __init__(self, history: list[dict[str, str]]) -> None:
+        self._text: str | None = None
+        self._ready = threading.Event()
+        self._used = False
+        if not os.getenv("OPENAI_API_KEY"):
+            self._ready.set()
+            return
+        threading.Thread(target=self._generate, args=(history,), daemon=True).start()
+
+    def _generate(self, history: list[dict[str, str]]) -> None:
+        recent = "\n".join(
+            f"{m['role']}: {m['content'][:1500]}" for m in history[-ACK_HISTORY_MESSAGES:]
+        )
+        try:
+            self._text = quick_completion([
+                {"role": "system", "content": ACK_PROMPT},
+                {"role": "user", "content": f"Conversation so far:\n{recent}"},
+            ])
+        except Exception as exc:
+            log.warning("[agent] acknowledgement failed: %s", exc)
+        finally:
+            self._ready.set()
+
+    def take(self, fallback: str) -> str:
+        if self._used:
+            return fallback
+        self._used = True
+        self._ready.wait(ACK_WAIT_SECONDS)
+        return self._text or fallback
+
+
 # ── Turn ───────────────────────────────────────────────────────────────────
 
 def _context_prompt(results: list[Row]) -> str:
@@ -358,6 +411,7 @@ def run_turn(
         *({"role": m["role"], "content": m["content"]} for m in history),
     ]
     reply_parts: list[str] = []
+    ack = _Acknowledgement(history)
 
     for step in range(AGENT_MAX_STEPS):
         if cancel and cancel.is_set():
@@ -377,7 +431,7 @@ def run_turn(
             nonlocal spoke, native_preamble
             if not spoke:
                 spoke = True
-                native_preamble = NATIVE_TOOL_PREAMBLE
+                native_preamble = ack.take(NATIVE_TOOL_PREAMBLE)
                 emit("token", {"text": native_preamble + "\n\n"})
             emit("thinking", {"text": t})
 
@@ -420,7 +474,7 @@ def run_turn(
             call_ok = True
 
         if call_ok and not visible:
-            visible = _preamble_for(name, args)
+            visible = ack.take(_preamble_for(name, args))
             log.info("[agent] step %d: tool call had no preamble, using fallback", step + 1)
             emit("token", {"text": visible})
         if visible:
