@@ -114,6 +114,7 @@ def chat_stream(
     on_token: Optional[Callable[[str], None]] = None,
     on_thinking: Optional[Callable[[str], None]] = None,
     cancel: Optional["threading.Event"] = None,
+    on_tool_progress: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
     Run a streaming chat completion using raw HTTP so that custom SSE event
@@ -209,11 +210,12 @@ def chat_stream(
 
                 # ── hermes.tool.progress ──────────────────────────────────
                 if evt == "hermes.tool.progress":
-                    if parsed.get("status") == "running" and on_thinking:
+                    progress_cb = on_tool_progress or on_thinking
+                    if parsed.get("status") == "running" and progress_cb:
                         emoji = parsed.get("emoji", "⚙️")
                         label = parsed.get("label") or parsed.get("tool", "tool")
                         thinking_chunks += 1
-                        on_thinking(f"{emoji} {label}\n")
+                        progress_cb(f"{emoji} {label}\n")
                     continue
 
                 # ── hermes.reason* (reasoning / think events) ────────────
