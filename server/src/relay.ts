@@ -21,6 +21,8 @@ export interface ChatMessage {
   content: string;
   at: Date;
   attachments?: Attachment[];
+  /** Milliseconds from worker dispatch to turn completion (assistant messages only). */
+  duration?: number;
 }
 
 export interface FileDoc {
@@ -70,6 +72,8 @@ interface Turn {
   attachments: Attachment[];
   /** File inserts still in flight; `done` waits for them before saving the reply. */
   pendingFiles: Promise<unknown>[];
+  /** Unix ms when startTurn() was called — used to compute response duration. */
+  startedAt: number;
 }
 
 // How long a finished turn's events stay available for late SSE subscribers
@@ -116,6 +120,7 @@ export function startTurn(
     thinkingBuffer: '',
     attachments: [],
     pendingFiles: [],
+    startedAt: Date.now(),
   });
   activeTurns.set(conversationId.toHexString(), turnId);
   workerSocket.send(JSON.stringify({
@@ -171,6 +176,7 @@ async function persist(turn: Turn, type: WorkerEventType, payload: unknown): Pro
     const { reply, results } = payload as { reply: string; results: BoothEntry[] };
     await Promise.allSettled(turn.pendingFiles);
     const now = new Date();
+    const duration = Date.now() - turn.startedAt;
     // Persist thinking block first (if any), then the assistant reply
     const newMessages: ChatMessage[] = [];
     if (turn.thinkingBuffer.trim()) {
@@ -180,6 +186,7 @@ async function persist(turn: Turn, type: WorkerEventType, payload: unknown): Pro
       role: 'assistant',
       content: reply,
       at: now,
+      duration,
       ...(turn.attachments.length ? { attachments: turn.attachments } : {}),
     });
     await col.updateOne(
