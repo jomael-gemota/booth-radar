@@ -73,7 +73,15 @@
   letter-spacing: -0.01em;
 }
 
-.sidebar-collapse-btn {
+.sidebar-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sidebar-collapse-btn,
+.sidebar-theme-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -88,7 +96,8 @@
   flex-shrink: 0;
 }
 
-.sidebar-collapse-btn:hover {
+.sidebar-collapse-btn:hover,
+.sidebar-theme-btn:hover {
   background: var(--surface-hover);
   color: var(--text-muted);
 }
@@ -1153,6 +1162,69 @@
   color: var(--text-muted);
   max-width: 420px;
   line-height: 1.7;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   LIGHT MODE — hardcoded colour overrides
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Code blocks */
+[data-theme="light"] .code-block {
+  background:   #f5f6fa;
+  border-color: #dde0ea;
+  color:        #1e2030;
+}
+
+[data-theme="light"] .code-inline {
+  background:   #ebebf5;
+  border-color: #d4d5e8;
+  color:        #5a4fc2;
+}
+
+/* Thinking bubble */
+[data-theme="light"] .thinking-header      { color: #6b5fd4; }
+[data-theme="light"] .thinking-header:hover{ color: #4f44b0; }
+[data-theme="light"] .thinking-orb         { background: #6b5fd4; }
+[data-theme="light"] .thinking-chevron     { color: #6b5fd4; }
+[data-theme="light"] .thinking-body {
+  color:            #6b5fd4;
+  border-left-color: rgba(107, 95, 212, 0.28);
+  scrollbar-color:  rgba(107, 95, 212, 0.22) transparent;
+}
+
+/* Results table header row */
+[data-theme="light"] .results-table th {
+  background: #f1f1f6;
+  color:      var(--text-muted);
+}
+
+/* System error message */
+[data-theme="light"] .msg-system {
+  background:   rgba(220, 38, 38, 0.06);
+  border-color: rgba(220, 38, 38, 0.22);
+  color:        #dc2626;
+}
+
+/* Inline spinner (loading state, not inside send button) */
+[data-theme="light"] .spinner {
+  border-color:     rgba(0, 0, 0, 0.12);
+  border-top-color: var(--accent);
+}
+
+/* Send-button spinner stays white — it sits on the purple button */
+[data-theme="light"] .send-btn .spinner {
+  border-color:     rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+}
+
+/* Profile menu shadow */
+[data-theme="light"] .sidebar-profile-menu {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.10);
+}
+
+/* Sign-in card shadow (also covers AccountPage card-level shadow if any) */
+[data-theme="light"] .signin-card {
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.08);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

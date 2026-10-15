@@ -34,8 +34,28 @@ body {
   height: 100%;
 }
 
+/* ── Light mode tokens ──────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --sidebar-bg:    #f8f8fa;
+  --main-bg:       #ffffff;
+  --surface:       #f1f1f5;
+  --surface-hover: #e8e8ed;
+  --border:        #e0e0e8;
+  --accent:        #6b5fd4;
+  --accent-hover:  #5a4fc2;
+  --accent-dim:    rgba(107, 95, 212, 0.10);
+  --text:          #111118;
+  --text-muted:    #52525e;
+  --text-faint:    #9898a8;
+  --error:         #dc2626;
+  --success:       #16a34a;
+  color-scheme: light;
+}
+
 /* ── Custom scrollbar ───────────────────────────────────────────────────── */
 ::-webkit-scrollbar            { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track      { background: transparent; }
 ::-webkit-scrollbar-thumb      { background: var(--border); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover{ background: #505050; }
+::-webkit-scrollbar-thumb:hover{ background: #a0a0a8; }
+
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #b0b0bc; }
