@@ -139,6 +139,7 @@ def chat_stream(
     on_thinking: Optional[Callable[[str], None]] = None,
     cancel: Optional["threading.Event"] = None,
     on_tool_progress: Optional[Callable[[str], None]] = None,
+    timeout: Optional[int] = None,
 ) -> str:
     """
     Run a streaming chat completion using raw HTTP so that custom SSE event
@@ -201,7 +202,7 @@ def chat_stream(
     current_event: Optional[str] = None
 
     try:
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=timeout or REQUEST_TIMEOUT) as resp:
             for raw_line in resp:
                 if cancel and cancel.is_set():
                     break

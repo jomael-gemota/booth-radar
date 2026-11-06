@@ -26,7 +26,9 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 import artifacts
-from agent import TurnCancelled, run_turn
+import tool_bridge
+from agent import AGENT_TOOL_MODE, TurnCancelled, run_turn
+from extractor import EXTRACT_MODEL
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -82,7 +84,7 @@ async def handle_chat(
     try:
         reply, new_results = await loop.run_in_executor(
             None, run_turn, messages, results, emit,
-            str(out_dir) if out_dir else None, cancel_event,
+            str(out_dir) if out_dir else None, cancel_event, turn_id,
         )
     except TurnCancelled:
         # Server already broadcast 'cancelled' to SSE clients — nothing more to send
@@ -178,4 +180,9 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
+    log.info("[worker] tool mode: %s", AGENT_TOOL_MODE)
+    if AGENT_TOOL_MODE == "mcp":
+        tool_bridge.start()
+        if not EXTRACT_MODEL:
+            log.warning("[worker] EXTRACT_MODEL is unset: page extraction will run full Hermes agent turns")
     asyncio.run(run())
