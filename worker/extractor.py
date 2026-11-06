@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from typing import Callable, Optional
 
@@ -21,6 +22,12 @@ MAX_PAGE_CHARS    = int(os.getenv("MAX_PAGE_CHARS", "40000"))
 REQUEST_TIMEOUT   = int(os.getenv("REQUEST_TIMEOUT", "120"))
 MAX_TOKENS        = int(os.getenv("MAX_TOKENS", "8192"))
 ACK_MODEL         = os.getenv("ACK_MODEL", "gpt-4o-mini")
+# Page extraction runs on a plain chat model (e.g. local Ollama) when set, so each
+# page is one completion instead of a full Hermes agent run.
+EXTRACT_BASE_URL  = os.getenv("EXTRACT_BASE_URL", "")
+EXTRACT_MODEL     = os.getenv("EXTRACT_MODEL", "")
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 # ── Thinking filter ────────────────────────────────────────────────────────
@@ -98,6 +105,7 @@ Rules:
 
 _client: Optional[OpenAI] = None
 _ack_client: Optional[OpenAI] = None
+_extract_client: Optional[OpenAI] = None
 
 
 def quick_completion(messages: list[dict[str, str]], max_tokens: int = 120) -> str:
@@ -300,7 +308,43 @@ def chat_stream(
 
     return full_text
 
-    return full_text
+
+def _get_extract_client() -> OpenAI:
+    global _extract_client
+    if _extract_client is None:
+        _extract_client = OpenAI(
+            base_url=EXTRACT_BASE_URL or None,
+            api_key=os.getenv("EXTRACT_API_KEY") or "not-needed",
+            timeout=REQUEST_TIMEOUT,
+        )
+    return _extract_client
+
+
+def _extraction_completion(
+    messages: list[dict[str, str]],
+    on_token: Optional[Callable[[str], None]],
+) -> str:
+    """One plain completion on EXTRACT_MODEL, or a Hermes request when it is unset."""
+    if not EXTRACT_MODEL:
+        return chat_stream(messages, on_token)
+    stream = _get_extract_client().chat.completions.create(
+        model=EXTRACT_MODEL,
+        messages=messages,  # type: ignore[arg-type]
+        max_tokens=MAX_TOKENS,
+        temperature=0,
+        stream=True,
+    )
+    parts: list[str] = []
+    with stream:
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            content = chunk.choices[0].delta.content or ""
+            if content:
+                parts.append(content)
+                if on_token:
+                    on_token(content)
+    return "".join(parts)
 
 
 def extract(
@@ -328,7 +372,7 @@ def extract(
     )
 
     log.info("[extractor] extracting from %s", url)
-    full_text = chat_stream(
+    full_text = _extraction_completion(
         [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": user_content},
@@ -336,6 +380,7 @@ def extract(
         on_token,
     )
     log.info("[extractor] received %d chars total", len(full_text))
+    full_text = _THINK_RE.sub("", full_text)
 
     # The model may wrap the array in fences or prose; take the outermost [...]
     start, end = full_text.find("["), full_text.rfind("]")
