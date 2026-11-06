@@ -1,9 +1,11 @@
 """
 agent.py  –  Conversational Booth Radar agent.
 
-Runs one assistant turn: Hermes either replies in plain text or calls a tool
-with a <tool>{...}</tool> block. Tool results are fed back as <tool_result>
-messages until Hermes answers without a tool call.
+Runs one assistant turn. In inline mode Hermes either replies in plain text or
+calls a tool with a <tool>{...}</tool> block; tool results are fed back as
+<tool_result> messages until Hermes answers without a tool call. In mcp mode
+Hermes calls the tools natively through mcp_server.py and tool_bridge.py, and
+the whole turn is a single Hermes request.
 """
 
 from __future__ import annotations
@@ -13,15 +15,21 @@ import logging
 import os
 import re
 import threading
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 import page_cache
+import tool_bridge
 from extractor import chat_stream, extract, quick_completion
 from scraper import SCRAPE_CONCURRENCY, load_page, scrape
 
 log = logging.getLogger(__name__)
 
+# "inline": Hermes calls tools with <tool> blocks parsed here.
+# "mcp": Hermes calls the booth-radar MCP server natively (needs the VM setup in README).
+AGENT_TOOL_MODE      = os.getenv("AGENT_TOOL_MODE", "inline").strip().lower()
+AGENT_STREAM_TIMEOUT = int(os.getenv("AGENT_STREAM_TIMEOUT", "900"))
 AGENT_MAX_STEPS      = int(os.getenv("AGENT_MAX_STEPS", "12"))
 ACK_WAIT_SECONDS     = float(os.getenv("ACK_WAIT_SECONDS", "4"))
 ACK_HISTORY_MESSAGES = 6
@@ -39,7 +47,7 @@ class TurnCancelled(Exception):
 TOOL_OPEN = "<tool>"
 _TOOL_RE = re.compile(r"<tool>\s*(.*?)\s*(?:</tool>|$)", re.DOTALL)
 
-SYSTEM_PROMPT = f"""\
+_PERSONA = """\
 You are Booth Radar, a friendly assistant that helps the team collect exhibitor
 brands and their booth locations from trade-show websites. You are genuinely
 conversational — you talk WITH the user, not just at them.
@@ -75,14 +83,16 @@ Good examples:
    grabbing the right exhibitor section and not a sponsor list."
 
 Bad (do NOT do this): jumping straight into a tool call with no message, or
-writing only "Fetching..." before the block — that's not conversational.
+writing only "Fetching..." before the call — that's not conversational.
 
 If the request is ambiguous or a URL is missing, ask ONE focused clarifying
 question instead of guessing. Do not use any tool until you have what you need.
 
 After EVERY tool result, if you are about to use another tool, explain what
 you learned and what you are going to do next before calling the next tool.
+"""
 
+_INLINE_TOOLS = f"""
 ────────────────────────────────────────────────────────────
 Tools
 ────────────────────────────────────────────────────────────
@@ -101,16 +111,39 @@ Available tools:
     Scrapes each URL and extracts every exhibitor brand + booth. Rows are added
     to the results table the user can export as CSV (duplicates are skipped).
     Max {MAX_URLS_PER_CALL} URLs per call; call it again for more.
-
-Pages loaded in the last hour are cached and return instantly. To answer
-follow-up questions about a site (other details on a page, a page you already
-looked at), call fetch_page again instead of guessing. Only set "refresh": true
-when the user asks for fresh or updated data.
 - clear_results  {{}}
     Empties the results table.
 
 After each tool call you will receive a <tool_result> message. Continue until
 the user's request is done, then reply in plain text WITHOUT a tool block.
+"""
+
+
+def _mcp_tools(turn_id: str) -> str:
+    return f"""
+────────────────────────────────────────────────────────────
+Tools
+────────────────────────────────────────────────────────────
+Use the booth-radar tools for every website request — never another browser,
+terminal or code tool. Pass turn="{turn_id}" on EVERY booth-radar call.
+
+- fetch_page(url, offset=0, refresh=false)
+    Loads a page and returns its visible text and links. Use it to understand a
+    site and discover pagination or A–Z letter pages. Long pages are cut at
+    {AGENT_PAGE_CHARS:,} chars; pass offset to read further.
+- extract_booths(urls, refresh=false)
+    Extracts every exhibitor brand + booth from each URL into the results table
+    (duplicates skipped). Max {MAX_URLS_PER_CALL} URLs per call; call again for more.
+- clear_results()
+    Empties the results table.
+"""
+
+
+_GUIDELINES = """
+Pages loaded in the last hour are cached and return instantly. To answer
+follow-up questions about a site (other details on a page, a page you already
+looked at), call fetch_page again instead of guessing. Only set refresh to true
+when the user asks for fresh or updated data.
 
 ────────────────────────────────────────────────────────────
 Guidelines
@@ -128,6 +161,14 @@ Guidelines
   were or weren't available. Speak only about the results and the user's request.
 - Keep replies concise — conversational does not mean verbose.
 """
+
+SYSTEM_PROMPT = _PERSONA + _INLINE_TOOLS + _GUIDELINES
+
+
+def _system_prompt(turn_id: str) -> str:
+    if AGENT_TOOL_MODE == "mcp":
+        return _PERSONA + _mcp_tools(turn_id) + _GUIDELINES
+    return SYSTEM_PROMPT
 
 
 # ── Streaming filter ───────────────────────────────────────────────────────
@@ -391,12 +432,83 @@ def _output_prompt(output_dir: str | None) -> str:
     )
 
 
+def _run_mcp_turn(
+    turn_id: str,
+    convo: list[dict[str, str]],
+    results: list[Row],
+    emit: Emit,
+    ack: _Acknowledgement,
+    cancel: threading.Event | None,
+) -> tuple[str, list[Row]]:
+    """One Hermes request; Hermes runs the tools itself via the MCP server and bridge."""
+    emit_lock = threading.Lock()
+    speak_lock = threading.Lock()
+    spoke = False
+    preamble = ""
+
+    def safe_emit(type_: str, payload: dict[str, Any]) -> None:
+        # Tools run on bridge threads while tokens stream on this one.
+        with emit_lock:
+            emit(type_, payload)
+
+    def speak_first(fallback: str) -> None:
+        nonlocal spoke, preamble
+        with speak_lock:
+            if spoke:
+                return
+            spoke = True
+        preamble = ack.take(fallback)
+        safe_emit("token", {"text": preamble + "\n\n"})
+
+    def on_visible(t: str) -> None:
+        nonlocal spoke
+        if t.strip():
+            spoke = True
+        safe_emit("token", {"text": t})
+
+    def on_tool_progress(t: str) -> None:
+        speak_first(NATIVE_TOOL_PREAMBLE)
+        safe_emit("thinking", {"text": t})
+
+    def run_tool(name: str, args: dict[str, Any]) -> str:
+        if cancel and cancel.is_set():
+            return "Error: the user cancelled this turn. Stop and do not call more tools."
+        args = {k: v for k, v in args.items() if k != "turn"}
+        speak_first(_preamble_for(name, args))
+        try:
+            return _run_tool(name, args, results, safe_emit)
+        except Exception as exc:
+            safe_emit("status", {"text": f"⚠️ {name} failed: {exc}"})
+            raise
+
+    tool_bridge.register(turn_id, run_tool)
+    try:
+        text = chat_stream(
+            convo,
+            on_token=on_visible,
+            on_thinking=lambda t: safe_emit("thinking", {"text": t}),
+            cancel=cancel,
+            on_tool_progress=on_tool_progress,
+            timeout=AGENT_STREAM_TIMEOUT,
+        )
+    finally:
+        tool_bridge.unregister(turn_id)
+
+    if cancel and cancel.is_set():
+        raise TurnCancelled()
+    reply = text.strip()
+    if preamble:
+        reply = f"{preamble}\n\n{reply}".strip()
+    return reply, results
+
+
 def run_turn(
     history: list[dict[str, str]],
     results: list[Row],
     emit: Emit,
     output_dir: str | None = None,
     cancel: threading.Event | None = None,
+    turn_id: str | None = None,
 ) -> tuple[str, list[Row]]:
     """
     Run one assistant turn over *history* (user/assistant messages, last one
@@ -404,15 +516,19 @@ def run_turn(
 
     Raises TurnCancelled if *cancel* is set before or between steps.
     """
+    turn_id = turn_id or uuid.uuid4().hex
     results = [dict(r) for r in results]
-    system = f"{SYSTEM_PROMPT}{_output_prompt(output_dir)}\n\n{_context_prompt(results)}"
+    system = f"{_system_prompt(turn_id)}{_output_prompt(output_dir)}\n\n{_context_prompt(results)}"
     convo: list[dict[str, str]] = [
         {"role": "system", "content": system},
         *({"role": m["role"], "content": m["content"]} for m in history),
     ]
-    reply_parts: list[str] = []
     ack = _Acknowledgement(history)
 
+    if AGENT_TOOL_MODE == "mcp":
+        return _run_mcp_turn(turn_id, convo, results, emit, ack, cancel)
+
+    reply_parts: list[str] = []
     for step in range(AGENT_MAX_STEPS):
         if cancel and cancel.is_set():
             raise TurnCancelled()

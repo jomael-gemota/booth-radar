@@ -22,7 +22,7 @@ Booth Radar lets you point it at any trade-show exhibitor directory and automati
 |---------|-----------|---------------|
 | **Client** | React + Vite (TypeScript) | Served by the server |
 | **Server** | Express + SSE relay | Railway |
-| **Worker** | Python agent — Playwright scraper + Hermes LLM | Ubuntu VM |
+| **Worker** | Python agent — Playwright scraper + Hermes LLM + MCP server for Hermes | Ubuntu VM |
 
 ```
 client/       Vite + React chat UI
@@ -80,6 +80,29 @@ Playwright browsers must be installed for the user the service runs as:
 # For a systemd unit running as root
 sudo .venv/bin/playwright install --with-deps chromium
 ```
+
+### Hermes MCP Setup
+
+With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`fetch_page`, `extract_booths`, `clear_results`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
+
+1. In `worker/.env`, set `TOOL_BRIDGE_TOKEN` (`openssl rand -hex 32`) and, for fast page extraction, `EXTRACT_BASE_URL` / `EXTRACT_MODEL` (free option: [Ollama](https://ollama.com) on the VM, e.g. `ollama pull qwen2.5:7b-instruct`).
+2. Register the server in `~/.hermes/config.yaml` for the user Hermes runs as:
+
+   ```yaml
+   mcp_servers:
+     booth-radar:
+       command: /path/to/booth-radar/worker/.venv/bin/python
+       args: ["/path/to/booth-radar/worker/mcp_server.py"]
+       timeout: 900
+       # Only needed if Hermes' user cannot read worker/.env:
+       # env:
+       #   TOOL_BRIDGE_TOKEN: "<same token as worker/.env>"
+   ```
+
+3. Limit the API server platform to Booth Radar's tools: run `hermes tools`, select the **api_server** platform and enable only `mcp-booth-radar` (optionally `skills` and `clarify`). Check with `hermes tools list`. To switch tools off on every platform instead, list them under `agent.disabled_toolsets` (e.g. `browser`, `terminal`, `code_execution`, `web`, `delegation`).
+4. Restart Hermes, set `AGENT_TOOL_MODE=mcp` in `worker/.env`, and restart the worker. Its log shows `tool mode: mcp` and `[bridge] listening on …`.
+
+To roll back, set `AGENT_TOOL_MODE=inline` and restart the worker.
 
 ### Scraping & Cache
 

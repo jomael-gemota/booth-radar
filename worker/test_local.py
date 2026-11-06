@@ -21,7 +21,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from agent import run_turn
+import tool_bridge
+from agent import AGENT_TOOL_MODE, run_turn
 from extractor import extract, _get_client
 from scraper import scrape
 
@@ -50,7 +51,9 @@ def chat() -> None:
         elif type_ == "status":
             print(f"\n  [{payload['text']}]", flush=True)
 
-    print("[test] chat mode — Ctrl+C to quit")
+    if AGENT_TOOL_MODE == "mcp":
+        tool_bridge.start()
+    print(f"[test] chat mode ({AGENT_TOOL_MODE} tools) — Ctrl+C to quit")
     while True:
         try:
             message = input("\nyou> ").strip()
