@@ -1,7 +1,7 @@
 """
 page_cache.py  –  In-memory TTL + LRU caches for scraped pages and extractions.
 
-  * pages        – url -> (visible_text, links)
+  * pages        – url -> (visible_text, links, markup)
   * extractions  – (url, sha1(page_text + field spec)) -> extracted rows
   * feeds / feed_records / sitemaps – site_feeds.py results per origin
 
@@ -60,11 +60,16 @@ class TTLCache(Generic[K, V]):
 
 Links = list[tuple[str, str]]
 Rows = list[dict[str, str]]
+# (visible_text, links, body HTML without scripts/styles)
+Page = tuple[str, Links, str]
 
-pages: TTLCache[str, tuple[str, Links]] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
+pages: TTLCache[str, Page] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
 extractions: TTLCache[tuple[str, str], Rows] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
 # Site feeds and sitemaps (site_feeds.py), keyed by origin
 feeds: TTLCache[str, list[Any]] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
+# JSON endpoints recorded by capture_api, keyed by origin; holds request headers,
+# so it lives only in memory
+api_feeds: TTLCache[str, list[Any]] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
 feed_records: TTLCache[str, list[dict[str, Any]]] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
 sitemaps: TTLCache[str, list[str]] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
 
