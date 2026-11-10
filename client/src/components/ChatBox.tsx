@@ -64,7 +64,7 @@ const WELCOME: Message = { id: 'welcome', role: 'assistant', text: '' }
 function getStaticGreeting(name?: string): { greeting: string; subtext: string } {
   const hour   = new Date().getHours()
   const suffix = name ? `, ${name}` : ''
-  const sub    = "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you."
+  const sub    = "Point me at any public website and tell me what to collect — exhibitors, products, prices, dealers — as a CSV."
   if (hour >= 5  && hour < 12) return { greeting: `Good morning${suffix}! I'm Booth Radar.`, subtext: sub }
   if (hour >= 12 && hour < 17) return { greeting: `Good afternoon${suffix}! I'm Booth Radar.`, subtext: sub }
   if (hour >= 17 && hour < 21) return { greeting: `Good evening${suffix}! I'm Booth Radar.`, subtext: sub }

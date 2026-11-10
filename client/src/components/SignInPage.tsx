@@ -19,8 +19,8 @@ export default function SignInPage({ authFailed }: SignInPageProps) {
           />
           <h1 className="signin-title">Booth Radar</h1>
           <p className="signin-sub">
-            Paste a trade-show exhibitor directory URL and get brands &amp; booth
-            numbers as a downloadable CSV.
+            Paste any public website, say what you need — exhibitors, products,
+            prices, dealers — and get it as a downloadable CSV.
           </p>
         </div>
 
