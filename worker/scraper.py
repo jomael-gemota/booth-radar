@@ -1,10 +1,11 @@
 """
-scraper.py  –  Fetch and clean text from an exhibitor website.
+scraper.py  –  Fetch and clean text from a website.
 
 Strategy:
-  1. Try Playwright (headless Chromium) to handle JS-rendered SPAs.
-  2. If the resulting text is too short (< MIN_TEXT_LEN chars),
-     fall back to requests + BeautifulSoup for static pages.
+  1. Plain HTTP when the page is server-rendered (SCRAPE_HTTP_FIRST).
+  2. Otherwise Playwright (headless Chromium) to handle JS-rendered SPAs.
+  3. If the rendered text is too short (< MIN_TEXT_LEN chars),
+     fall back to requests + BeautifulSoup.
 
 Pages are loaded on a shared pool of SCRAPE_CONCURRENCY threads, each keeping a
 warm Chromium, and results are cached in page_cache.pages.
@@ -12,6 +13,7 @@ warm Chromium, and results are cached in page_cache.pages.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -33,6 +35,23 @@ SCRAPE_CONCURRENCY     = max(1, int(os.getenv("SCRAPE_CONCURRENCY", "4")))
 SCRAPE_IDLE_TIMEOUT_MS = int(os.getenv("SCRAPE_IDLE_TIMEOUT_MS", "8000"))
 
 _BLOCKED_RESOURCES = {"image", "media", "font"}
+
+# JSON-LD node types worth passing to the extractor (skips WebPage/Breadcrumb noise)
+_LD_TYPES = {
+    "Product", "ProductGroup", "Offer", "AggregateOffer", "ItemList", "ListItem",
+    "Event", "ExhibitionEvent", "BusinessEvent", "LocalBusiness", "Store", "Place",
+    "PostalAddress", "Brand", "JobPosting",
+}
+MAX_LD_CHARS = 8000
+
+# Server-rendered pages are read over plain HTTP (much faster than Chromium); pages
+# with little text or an empty JS app shell are rendered in the browser.
+SCRAPE_HTTP_FIRST = os.getenv("SCRAPE_HTTP_FIRST", "true").strip().lower() not in ("0", "false", "no")
+HTTP_MIN_TEXT_LEN = 1500
+_SPA_SHELL = re.compile(r'<div[^>]+id="(?:root|app|__next|__nuxt)"[^>]*>\s*</div>', re.IGNORECASE)
+
+# url keys whose plain HTTP fetch was not enough and were rendered by the browser
+_rendered: set[str] = set()
 
 # Playwright's sync API is bound to the thread that started it, so each pool
 # thread owns its own Playwright instance and browser.
@@ -151,13 +170,34 @@ def _fetch_playwright(url: str) -> str:
         return _render(url)
 
 
-def fetch_html(url: str) -> str:
+def _fetch_static(url: str) -> str | None:
+    """Plain HTTP HTML when it already holds the page content; None if it needs a browser."""
+    try:
+        html = _fetch_requests(url)
+    except Exception as exc:
+        log.info("[scraper] plain fetch failed for %s (%s), rendering instead", url, exc)
+        return None
+    if _SPA_SHELL.search(html):
+        return None
+    if len(_clean(BeautifulSoup(html, "html.parser"))) < HTTP_MIN_TEXT_LEN:
+        return None
+    return html
+
+
+def fetch_html(url: str, browser: bool = False) -> tuple[str, bool]:
     """
-    Return the HTML of *url*, rendered by Playwright when possible.
+    Return (html, rendered_by_browser) for *url*. Unless *browser* is set, a plain
+    HTTP fetch is used when the page is server-rendered; otherwise Playwright.
     Raises on unrecoverable errors.
     """
     if not re.match(r"https?://", url, re.IGNORECASE):
         raise ValueError(f"Invalid URL: {url!r}")
+
+    if SCRAPE_HTTP_FIRST and not browser:
+        static = _fetch_static(url)
+        if static is not None:
+            log.info("[scraper] using plain HTTP for %s", url)
+            return static, False
 
     html = ""
     playwright_error: str | None = None
@@ -185,43 +225,84 @@ def fetch_html(url: str) -> str:
                 f"The page returned almost no text without a browser "
                 f"({len(fallback_text)} chars) and the headless browser failed: {playwright_error}"
             )
-        html = fallback
+        return fallback, False
 
-    return html
+    return html, True
 
 
-def _load(url: str) -> tuple[str, list[tuple[str, str]]]:
-    soup = BeautifulSoup(fetch_html(url), "html.parser")
+def _ld_nodes(data: Any) -> list[dict[str, Any]]:
+    """Flatten JSON-LD (lists and @graph) into nodes whose @type is useful data."""
+    if isinstance(data, list):
+        return [n for item in data for n in _ld_nodes(item)]
+    if not isinstance(data, dict):
+        return []
+    if "@graph" in data:
+        return _ld_nodes(data["@graph"])
+    types = data.get("@type")
+    types = types if isinstance(types, list) else [types]
+    return [data] if _LD_TYPES & {str(t) for t in types} else []
+
+
+def _structured_data(soup: BeautifulSoup) -> str:
+    nodes: list[dict[str, Any]] = []
+    for tag in soup.find_all("script", type="application/ld+json"):
+        try:
+            nodes += _ld_nodes(json.loads(tag.string or ""))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    if not nodes:
+        return ""
+    return json.dumps(nodes, ensure_ascii=False, separators=(",", ":"))[:MAX_LD_CHARS]
+
+
+def _load(url: str, browser: bool) -> tuple[str, list[tuple[str, str]], bool]:
+    html, rendered = fetch_html(url, browser)
+    soup = BeautifulSoup(html, "html.parser")
     links = _links(soup, url)
+    structured = _structured_data(soup)
     text = _clean(soup)
     if not text.strip():
         raise RuntimeError("Scraping returned empty content")
-    return text, links
+    if structured:
+        text += f"\n\n--- STRUCTURED DATA (JSON-LD) ---\n{structured}"
+    return text, links, rendered
 
 
-def load_page(url: str, refresh: bool = False) -> tuple[str, list[tuple[str, str]], bool]:
+def used_browser(url: str) -> bool:
+    """True if the cached copy of *url* was already rendered by the browser."""
+    return page_cache.url_key(url) in _rendered
+
+
+def load_page(
+    url: str, refresh: bool = False, browser: bool = False,
+) -> tuple[str, list[tuple[str, str]], bool]:
     """
     Return (visible_text, links, from_cache) for *url*, serving recently
-    loaded pages from the cache unless *refresh* is set.
+    loaded pages from the cache unless *refresh* is set. *browser* forces a
+    Playwright render instead of a plain HTTP fetch.
     """
     key = page_cache.url_key(url)
+    browser = browser and key not in _rendered
+    cache_key = f"{key} [browser]" if browser else key
     if not refresh:
-        cached = page_cache.pages.get(key)
+        cached = page_cache.pages.get(cache_key)
         if cached is not None:
-            log.info("[scraper] cache hit for %s", key)
+            log.info("[scraper] cache hit for %s", cache_key)
             return cached[0], cached[1], True
 
     if getattr(_local, "in_pool", False):
-        text, links = _load(key)
+        text, links, rendered = _load(key, browser)
     else:
-        text, links = _pool.submit(_load, key).result()
-    page_cache.pages.set(key, (text, links))
+        text, links, rendered = _pool.submit(_load, key, browser).result()
+    if rendered and not browser:
+        _rendered.add(key)
+    page_cache.pages.set(cache_key, (text, links))
     return text, links, False
 
 
-def scrape(url: str, refresh: bool = False) -> str:
+def scrape(url: str, refresh: bool = False, browser: bool = False) -> str:
     """Scrape *url* and return clean visible text."""
-    return load_page(url, refresh)[0]
+    return load_page(url, refresh, browser)[0]
 
 
 def snapshot(url: str, refresh: bool = False) -> tuple[str, list[tuple[str, str]]]:
