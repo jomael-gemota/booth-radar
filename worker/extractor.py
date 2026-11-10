@@ -12,9 +12,9 @@ import logging
 import os
 import re
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +106,7 @@ Rules:
 _client: Optional[OpenAI] = None
 _ack_client: Optional[OpenAI] = None
 _extract_client: Optional[OpenAI] = None
+_extract_params: dict[str, Any] = {"max_tokens": MAX_TOKENS, "temperature": 0}
 
 
 def quick_completion(messages: list[dict[str, str]], max_tokens: int = 120) -> str:
@@ -321,6 +322,35 @@ def _get_extract_client() -> OpenAI:
     return _extract_client
 
 
+def _open_extraction_stream(messages: list[dict[str, str]]) -> Any:
+    """
+    Start the EXTRACT_MODEL stream. Newer OpenAI models reject `max_tokens` and
+    `temperature`, while most other servers still expect `max_tokens`; whatever the
+    model refuses is adjusted once and remembered for later pages.
+    """
+    global _extract_params
+    for _ in range(3):
+        params = dict(_extract_params)
+        try:
+            return _get_extract_client().chat.completions.create(
+                model=EXTRACT_MODEL,
+                messages=messages,  # type: ignore[arg-type]
+                stream=True,
+                **params,
+            )
+        except BadRequestError as exc:
+            rejected = getattr(exc, "param", None)
+            if rejected not in params:
+                raise
+            if rejected == "max_tokens":
+                params["max_completion_tokens"] = params.pop("max_tokens")
+            else:
+                params.pop(rejected)
+            log.info("[extractor] %s rejected %r, retrying with %s", EXTRACT_MODEL, rejected, sorted(params))
+            _extract_params = params
+    raise RuntimeError(f"{EXTRACT_MODEL} rejected the extraction request parameters")
+
+
 def _extraction_completion(
     messages: list[dict[str, str]],
     on_token: Optional[Callable[[str], None]],
@@ -328,13 +358,7 @@ def _extraction_completion(
     """One plain completion on EXTRACT_MODEL, or a Hermes request when it is unset."""
     if not EXTRACT_MODEL:
         return chat_stream(messages, on_token)
-    stream = _get_extract_client().chat.completions.create(
-        model=EXTRACT_MODEL,
-        messages=messages,  # type: ignore[arg-type]
-        max_tokens=MAX_TOKENS,
-        temperature=0,
-        stream=True,
-    )
+    stream = _open_extraction_stream(messages)
     parts: list[str] = []
     with stream:
         for chunk in stream:
