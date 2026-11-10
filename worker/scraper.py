@@ -19,7 +19,7 @@ import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Callable, TypeVar
 from urllib.parse import urljoin, urldefrag
 
 import requests
@@ -29,12 +29,22 @@ import page_cache
 
 log = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
 MIN_TEXT_LEN = 200  # chars; below this, try the requests fallback
 MAX_LINKS = 150
 SCRAPE_CONCURRENCY     = max(1, int(os.getenv("SCRAPE_CONCURRENCY", "4")))
 SCRAPE_IDLE_TIMEOUT_MS = int(os.getenv("SCRAPE_IDLE_TIMEOUT_MS", "8000"))
 
 _BLOCKED_RESOURCES = {"image", "media", "font"}
+# Kept out of the cached markup used by recipes (no data, lots of bytes)
+_MARKUP_STRIP_TAGS = ["script", "style", "noscript", "svg", "template", "iframe", "link", "meta"]
+
+# capture_json(): JSON responses recorded while a page loads
+MAX_CAPTURED_RESPONSES = 40
+MAX_CAPTURE_BYTES      = 5_000_000
+CAPTURE_SCROLL_ROUNDS  = 5
+CAPTURE_SCROLL_WAIT_MS = 3000
 
 # JSON-LD node types worth passing to the extractor (skips WebPage/Breadcrumb noise)
 _LD_TYPES = {
@@ -134,19 +144,23 @@ def _block_heavy_assets(route: Any) -> None:
         route.continue_()
 
 
-def _render(url: str) -> str:
+def _settle(page: Any, url: str, timeout_ms: int = SCRAPE_IDLE_TIMEOUT_MS) -> None:
     from playwright.sync_api import TimeoutError as PlaywrightTimeout  # type: ignore
 
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    except PlaywrightTimeout:
+        # Sites with constant polling never go idle; use what has rendered.
+        log.info("[scraper] networkidle timed out for %s, using current DOM", url)
+
+
+def _render(url: str) -> str:
     context = _browser().new_context()
     try:
         context.route("**/*", _block_heavy_assets)
         page = context.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        try:
-            page.wait_for_load_state("networkidle", timeout=SCRAPE_IDLE_TIMEOUT_MS)
-        except PlaywrightTimeout:
-            # Sites with constant polling never go idle; use what has rendered.
-            log.info("[scraper] networkidle timed out for %s, using current DOM", url)
+        _settle(page, url)
         return page.content()
     finally:
         try:
@@ -155,10 +169,10 @@ def _render(url: str) -> str:
             pass
 
 
-def _fetch_playwright(url: str) -> str:
-    """Use Playwright (sync API) for JS-rendered pages."""
+def _with_browser(fn: Callable[..., T], url: str, *args: Any) -> T:
+    """Run fn(url, …) with this thread's Chromium, relaunching it once if it crashed."""
     try:
-        return _render(url)
+        return fn(url, *args)
     except ImportError:
         raise
     except Exception:
@@ -167,7 +181,12 @@ def _fetch_playwright(url: str) -> str:
             raise
         log.warning("[scraper] Chromium disconnected, relaunching for %s", url)
         _local.browser = None
-        return _render(url)
+        return fn(url, *args)
+
+
+def _fetch_playwright(url: str) -> str:
+    """Use Playwright (sync API) for JS-rendered pages."""
+    return _with_browser(_render, url)
 
 
 def _fetch_static(url: str) -> str | None:
@@ -255,22 +274,49 @@ def _structured_data(soup: BeautifulSoup) -> str:
     return json.dumps(nodes, ensure_ascii=False, separators=(",", ":"))[:MAX_LD_CHARS]
 
 
-def _load(url: str, browser: bool) -> tuple[str, list[tuple[str, str]], bool]:
+def _load(url: str, browser: bool) -> tuple[page_cache.Page, bool]:
     html, rendered = fetch_html(url, browser)
     soup = BeautifulSoup(html, "html.parser")
     links = _links(soup, url)
     structured = _structured_data(soup)
+    for tag in soup(_MARKUP_STRIP_TAGS):
+        tag.decompose()
+    markup = str(soup.body or soup)
     text = _clean(soup)
     if not text.strip():
         raise RuntimeError("Scraping returned empty content")
     if structured:
         text += f"\n\n--- STRUCTURED DATA (JSON-LD) ---\n{structured}"
-    return text, links, rendered
+    return (text, links, markup), rendered
+
+
+def _in_pool(fn: Callable[..., T], *args: Any) -> T:
+    """Run fn on a scrape pool thread (Playwright's sync API is bound to its thread)."""
+    if getattr(_local, "in_pool", False):
+        return fn(*args)
+    return _pool.submit(fn, *args).result()
 
 
 def used_browser(url: str) -> bool:
     """True if the cached copy of *url* was already rendered by the browser."""
     return page_cache.url_key(url) in _rendered
+
+
+def _page(url: str, refresh: bool, browser: bool) -> tuple[page_cache.Page, bool]:
+    key = page_cache.url_key(url)
+    browser = browser and key not in _rendered
+    cache_key = f"{key} [browser]" if browser else key
+    if not refresh:
+        cached = page_cache.pages.get(cache_key)
+        if cached is not None:
+            log.info("[scraper] cache hit for %s", cache_key)
+            return cached, True
+
+    entry, rendered = _in_pool(_load, key, browser)
+    if rendered and not browser:
+        _rendered.add(key)
+    page_cache.pages.set(cache_key, entry)
+    return entry, False
 
 
 def load_page(
@@ -281,28 +327,83 @@ def load_page(
     loaded pages from the cache unless *refresh* is set. *browser* forces a
     Playwright render instead of a plain HTTP fetch.
     """
-    key = page_cache.url_key(url)
-    browser = browser and key not in _rendered
-    cache_key = f"{key} [browser]" if browser else key
-    if not refresh:
-        cached = page_cache.pages.get(cache_key)
-        if cached is not None:
-            log.info("[scraper] cache hit for %s", cache_key)
-            return cached[0], cached[1], True
+    (text, links, _), cached = _page(url, refresh, browser)
+    return text, links, cached
 
-    if getattr(_local, "in_pool", False):
-        text, links, rendered = _load(key, browser)
-    else:
-        text, links, rendered = _pool.submit(_load, key, browser).result()
-    if rendered and not browser:
-        _rendered.add(key)
-    page_cache.pages.set(cache_key, (text, links))
-    return text, links, False
+
+def load_markup(url: str, refresh: bool = False, browser: bool = False) -> tuple[str, str]:
+    """Return (visible_text, body HTML without scripts/styles) for *url*, cached like load_page."""
+    (text, _, markup), _ = _page(url, refresh, browser)
+    return text, markup
 
 
 def scrape(url: str, refresh: bool = False, browser: bool = False) -> str:
     """Scrape *url* and return clean visible text."""
     return load_page(url, refresh, browser)[0]
+
+
+def _capture(url: str, scroll: bool) -> list[dict[str, Any]]:
+    responses: list[Any] = []
+
+    def on_response(response: Any) -> None:
+        if response.request.resource_type in ("xhr", "fetch") and len(responses) < MAX_CAPTURED_RESPONSES * 3:
+            responses.append(response)
+
+    context = _browser().new_context()
+    try:
+        context.route("**/*", _block_heavy_assets)
+        page = context.new_page()
+        page.on("response", on_response)
+        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+        _settle(page, url)
+        if scroll:
+            for _ in range(CAPTURE_SCROLL_ROUNDS):
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                _settle(page, url, CAPTURE_SCROLL_WAIT_MS)
+
+        captured: list[dict[str, Any]] = []
+        for response in responses:
+            if len(captured) >= MAX_CAPTURED_RESPONSES:
+                break
+            if response.status != 200 or "json" not in (response.headers.get("content-type") or ""):
+                continue
+            try:
+                body = response.body()
+                if len(body) > MAX_CAPTURE_BYTES:
+                    continue
+                data = json.loads(body)
+            except Exception:
+                continue
+            request = response.request
+            try:
+                headers = request.all_headers()
+            except Exception:
+                headers = dict(request.headers)
+            captured.append({
+                "method": request.method,
+                "url": request.url,
+                "headers": headers,
+                "body": request.post_data,
+                "data": data,
+            })
+        log.info("[scraper] captured %d JSON responses on %s", len(captured), url)
+        return captured
+    finally:
+        try:
+            context.close()
+        except Exception:
+            pass
+
+
+def capture_json(url: str, scroll: bool = False) -> list[dict[str, Any]]:
+    """
+    Render *url* in Chromium (optionally scrolling to the bottom a few times) and
+    return the JSON XHR/fetch responses it received: method, url, request headers,
+    POST body and parsed JSON data.
+    """
+    if not re.match(r"https?://", url, re.IGNORECASE):
+        raise ValueError(f"Invalid URL: {url!r}")
+    return _in_pool(_with_browser, _capture, page_cache.url_key(url), scroll)
 
 
 def snapshot(url: str, refresh: bool = False) -> tuple[str, list[tuple[str, str]]]:

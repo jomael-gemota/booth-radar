@@ -159,3 +159,6 @@ venv/
 # Build outputs
 server/dist/
 client/dist/
+
+# Worker runtime data (learned recipes)
+worker/data/

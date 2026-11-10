@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
 from openai import BadRequestError, OpenAI
@@ -19,6 +20,10 @@ from openai import BadRequestError, OpenAI
 log = logging.getLogger(__name__)
 
 MAX_PAGE_CHARS    = int(os.getenv("MAX_PAGE_CHARS", "40000"))
+# Longer pages are extracted in overlapping chunks of MAX_PAGE_CHARS
+MAX_PAGE_CHUNKS     = 6
+CHUNK_OVERLAP_CHARS = 1500
+CHUNK_CONCURRENCY   = 3
 REQUEST_TIMEOUT   = int(os.getenv("REQUEST_TIMEOUT", "120"))
 MAX_TOKENS        = int(os.getenv("MAX_TOKENS", "8192"))
 ACK_MODEL         = os.getenv("ACK_MODEL", "gpt-4o-mini")
@@ -414,6 +419,36 @@ def _parse_array(full_text: str) -> list[Any]:
     return results
 
 
+def complete_json(system: str, user: str) -> Any:
+    """One extraction-model completion parsed as a JSON object."""
+    text = _THINK_RE.sub("", _extraction_completion(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}], None,
+    ))
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end < start:
+        raise ValueError("The model did not return a JSON object")
+    return json.loads(text[start:end + 1])
+
+
+def _chunks(text: str) -> list[str]:
+    """Split *text* on line boundaries into MAX_PAGE_CHARS pieces that overlap slightly."""
+    if len(text) <= MAX_PAGE_CHARS:
+        return [text]
+    chunks: list[str] = []
+    start = end = 0
+    while len(chunks) < MAX_PAGE_CHUNKS:
+        end = min(len(text), start + MAX_PAGE_CHARS)
+        if end < len(text):
+            cut = text.rfind("\n", start + MAX_PAGE_CHARS // 2, end)
+            end = cut if cut != -1 else end
+        chunks.append(text[start:end])
+        if end >= len(text):
+            return chunks
+        start = max(start + 1, end - CHUNK_OVERLAP_CHARS)
+    log.warning("[extractor] page text cut after %d chunks (%d of %d chars)", MAX_PAGE_CHUNKS, end, len(text))
+    return chunks
+
+
 def extract(
     page_text: str,
     url: str,
@@ -423,30 +458,47 @@ def extract(
 ) -> list[dict[str, str]]:
     """
     Run an LLM extraction over *page_text*. With *fields*, returns rows with exactly
-    those keys; without, returns exhibitor {"brand": …, "booth": …} rows.
+    those keys; without, returns exhibitor {"brand": …, "booth": …} rows. Text longer
+    than MAX_PAGE_CHARS is extracted in overlapping chunks in parallel.
 
     Raises on LLM or JSON parse errors.
     """
-    truncated = page_text[:MAX_PAGE_CHARS]
-    if len(page_text) > MAX_PAGE_CHARS:
-        log.warning(
-            "[extractor] page text truncated from %d to %d chars",
-            len(page_text),
-            MAX_PAGE_CHARS,
-        )
+    chunks = _chunks(page_text)
+    if len(chunks) == 1:
+        return _extract_chunk(page_text, url, on_token, fields, instructions)
 
+    log.info("[extractor] %s: %d chars in %d chunks", url, len(page_text), len(chunks))
+    with ThreadPoolExecutor(max_workers=min(CHUNK_CONCURRENCY, len(chunks))) as pool:
+        parts = list(pool.map(lambda c: _extract_chunk(c, url, None, fields, instructions), chunks))
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in (r for part in parts for r in part):
+        key = json.dumps(row, sort_keys=True, ensure_ascii=False)
+        if key not in seen:
+            seen.add(key)
+            rows.append(row)
+    return rows
+
+
+def _extract_chunk(
+    page_text: str,
+    url: str,
+    on_token: Optional[Callable[[str], None]],
+    fields: Optional[list[str]],
+    instructions: str,
+) -> list[dict[str, str]]:
     if fields:
         system = GENERIC_PROMPT.replace("{fields}", json.dumps(fields, ensure_ascii=False))
         request = f"What to extract: {instructions.strip()}\n\n" if instructions.strip() else ""
         user_content = (
             f"Source: {url}\n{request}"
-            f"--- CONTENT START ---\n{truncated}\n--- CONTENT END ---"
+            f"--- CONTENT START ---\n{page_text}\n--- CONTENT END ---"
         )
     else:
         system = SYSTEM_PROMPT
         user_content = (
             f"Exhibitor website: {url}\n\n"
-            f"--- SCRAPED TEXT START ---\n{truncated}\n--- SCRAPED TEXT END ---"
+            f"--- SCRAPED TEXT START ---\n{page_text}\n--- SCRAPED TEXT END ---"
         )
 
     log.info("[extractor] extracting from %s", url)

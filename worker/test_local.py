@@ -6,6 +6,8 @@ Usage:
     python test_local.py https://example.com/item --fields "Name,Price,SKU"
                                                            # one-shot extract of chosen fields
     python test_local.py --feeds https://example.com       # list data feeds, read the first
+    python test_local.py --capture https://example.com/search [--scroll]
+                                                           # record a page's JSON APIs, read the first
     python test_local.py --chat                            # chat with the agent in the terminal
     python test_local.py --probe-api                       # probe Hermes API for thinking format
     python test_local.py --probe-server                    # discover all server endpoints + params
@@ -50,6 +52,19 @@ def feeds(url: str) -> None:
     started = time.monotonic()
     found = site_feeds.find_feeds(url)
     print(f"[test] {len(found)} feeds in {time.monotonic() - started:.1f}s")
+    for feed in found:
+        print(feed.describe())
+    if found:
+        started = time.monotonic()
+        records = site_feeds.read_feed(url, found[0].id)
+        print(f"\n[test] {found[0].id}: {len(records)} records in {time.monotonic() - started:.1f}s; first:")
+        print(json.dumps(records[:1], indent=2, ensure_ascii=False))
+
+
+def capture(url: str, scroll: bool) -> None:
+    started = time.monotonic()
+    found = site_feeds.capture_api(url, scroll)
+    print(f"[test] {len(found)} JSON record endpoints in {time.monotonic() - started:.1f}s")
     for feed in found:
         print(feed.describe())
     if found:
@@ -351,6 +366,8 @@ def main() -> None:
         probe_raw(sys.argv[2] if len(sys.argv) > 2 else None)
     elif sys.argv[1] == "--feeds" and len(sys.argv) > 2:
         feeds(sys.argv[2])
+    elif sys.argv[1] == "--capture" and len(sys.argv) > 2:
+        capture(sys.argv[2], "--scroll" in sys.argv[3:])
     elif len(sys.argv) > 3 and sys.argv[2] == "--fields":
         scrape_once(sys.argv[1], [f.strip() for f in sys.argv[3].split(",") if f.strip()])
     else:
