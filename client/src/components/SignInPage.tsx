@@ -12,7 +12,7 @@ export default function SignInPage({ authFailed }: SignInPageProps) {
         {/* Logo + branding */}
         <div className="signin-brand">
           <img
-            src="/logo.png"
+            src="/logo.gif"
             alt="Booth Radar logo"
             className="signin-logo"
             draggable={false}
