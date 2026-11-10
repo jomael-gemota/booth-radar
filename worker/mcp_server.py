@@ -28,8 +28,8 @@ server = MCPServer(
     instructions=(
         "Booth Radar's website data tools. Always pass the `turn` id given in your "
         "instructions. Use these tools for every website request: find_feeds first, "
-        "read_feed when a feed has the items, otherwise map_site or fetch_page to "
-        "find pages and extract."
+        "read_feed when a feed has the items, capture_api on listing pages without a "
+        "feed, otherwise map_site or fetch_page to find pages and extract."
     ),
 )
 
@@ -78,13 +78,25 @@ async def read_feed(
     refresh: bool = False,
 ) -> str:
     """
-    Read every record of one feed (id from find_feeds) and fill the user's results
-    table with the requested fields. Fastest way to collect a whole catalog or list.
+    Read every record of one feed (id from find_feeds or capture_api) and fill the
+    user's results table with the requested fields. Fastest way to collect a whole
+    catalog or list.
     """
     return await _call(
         "read_feed", turn, url=url, feed=feed, fields=fields, instructions=instructions,
         key_fields=key_fields or [], replace=replace, refresh=refresh,
     )
+
+
+@server.tool(structured_output=False)
+async def capture_api(url: str, turn: str = "", scroll: bool = False) -> str:
+    """
+    Open a listing or search page in the browser and record the JSON data requests it
+    makes. Each one that returns records becomes a feed (api:1, api:2, …) readable with
+    read_feed. Use it when find_feeds found nothing; set `scroll` for infinite-scroll or
+    "load more" pages.
+    """
+    return await _call("capture_api", turn, url=url, scroll=scroll)
 
 
 @server.tool(structured_output=False)

@@ -16,15 +16,17 @@ import os
 import re
 import threading
 import uuid
+from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 import page_cache
+import recipes
 import site_feeds
 import tool_bridge
 from extractor import chat_stream, extract, quick_completion
 from results_table import ResultsTable
-from scraper import SCRAPE_CONCURRENCY, load_page, scrape, used_browser
+from scraper import SCRAPE_CONCURRENCY, load_markup, load_page, scrape, used_browser
 
 log = logging.getLogger(__name__)
 
@@ -122,10 +124,21 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
         '{"url": "https://...", "feed": "wp:product", "fields": ["Product Name", "URL"], '
         '"instructions": "", "key_fields": [], "replace": false}',
         'read_feed(url, feed, fields, instructions="", key_fields=[], replace=false)',
-        "Reads every record of one feed and fills the results table with the\n"
-        "requested fields. Fastest way to collect a whole catalog or list. Feeds\n"
+        "Reads every record of one feed (from find_feeds or capture_api) and fills the\n"
+        "results table with the requested fields. Fastest way to collect a whole\n"
+        "catalog or list. Feeds\n"
         "often lack details only shown on each item's page (specs, prices): collect\n"
         "the URLs here, then extract those pages for the missing fields.",
+    ),
+    (
+        "capture_api",
+        '{"url": "https://...", "scroll": false}',
+        "capture_api(url, scroll=false)",
+        "Opens a page in the browser and records the JSON data requests it makes\n"
+        "(search results, product grids, store lists). Each one that returns records\n"
+        "becomes a feed (api:1, api:2, …) you can read with read_feed. Use it on a\n"
+        "listing or search page when find_feeds found nothing. Set scroll=true for\n"
+        "infinite-scroll or \"load more\" pages.",
     ),
     (
         "map_site",
@@ -212,11 +225,15 @@ _GUIDELINES = """
 ────────────────────────────────────────────────────────────
 How to scrape fast
 ────────────────────────────────────────────────────────────
-1. New site: call find_feeds. If a feed holds the items the user wants,
-   read_feed collects all of them in seconds.
-2. Need details the feed lacks (or no feed): get the item URLs from the feed
-   rows, map_site, or a listing page, then extract them in batches.
-3. Only use fetch_page to understand a site's layout or answer a question.
+1. New site: ALWAYS call find_feeds first. If a feed holds the items the user
+   wants, read_feed collects all of them in seconds. Do not extract listing
+   pages or read the sitemap to collect items or URLs a feed already gives.
+2. No feed, and the items are listed on a search, category or "load more"
+   page: call capture_api on that page and read_feed the api feed it finds.
+3. Need details the feed lacks (or nothing above worked): get the item URLs
+   from the feed rows, map_site, or a listing page, then extract them in
+   batches. Pages with the same layout are read faster after the first one.
+4. Only use fetch_page to understand a site's layout or answer a question.
 
 Fields: take them from the user's request as short, human-readable column
 names ("Product Name", "Style Number", "Height", "Price", "URL"). Include "URL"
@@ -352,18 +369,84 @@ def _cached_extract(
     return [dict(r) for r in rows]
 
 
-def _extract_url(url: str, refresh: bool, fields: list[str] | None = None, instructions: str = "") -> list[Row]:
+def _model_rows(
+    url: str, refresh: bool, fields: list[str] | None, instructions: str,
+) -> tuple[list[Row], bool]:
+    """Rows the extraction model finds on *url*, and whether the page was force-rendered."""
     key = page_cache.url_key(url)
     rows = _cached_extract(key, scrape(url, refresh), url, fields, instructions, refresh)
-    if not rows and not used_browser(url):
-        # The plain HTTP copy may lack JavaScript-loaded content; try the rendered page.
-        log.info("[agent] no rows from plain fetch of %s, rendering in the browser", url)
-        rows = _cached_extract(key, scrape(url, refresh, browser=True), url, fields, instructions, refresh)
-    for name in fields or []:
+    if rows or used_browser(url):
+        return rows, False
+    # The plain HTTP copy may lack JavaScript-loaded content; try the rendered page.
+    log.info("[agent] no rows from plain fetch of %s, rendering in the browser", url)
+    return _cached_extract(key, scrape(url, refresh, browser=True), url, fields, instructions, refresh), True
+
+
+def _fill_urls(rows: list[Row], fields: list[str], url: str) -> list[Row]:
+    for name in fields:
         if name.casefold() in _URL_FIELDS:
             for row in rows:
                 row[name] = row.get(name) or url
     return rows
+
+
+class _PageRecipes:
+    """Saved and newly learned page recipes for one extract call."""
+
+    def __init__(self, urls: list[str], fields: list[str], refresh: bool) -> None:
+        self.fields = fields
+        self.keys = [recipes.page_key(u, fields) for u in urls]
+        self._lock = threading.Lock()
+        self._recipes: dict[str, dict[str, Any]] = {}
+        self._fallbacks: Counter[str] = Counter()
+        self.uses: Counter[str] = Counter()
+        self._learn: set[str] = set()
+        for key, count in Counter(self.keys).items():
+            saved = None if refresh else recipes.get(key)
+            if saved:
+                self._recipes[key] = saved
+            elif count >= recipes.MIN_RECIPE_PAGES:
+                self._learn.add(key)
+
+    def leaders(self) -> list[int]:
+        """The first URL of each layout that still needs a recipe; extracted before the rest."""
+        return [self.keys.index(k) for k in sorted(self._learn, key=self.keys.index)]
+
+    def read(self, i: int, url: str, refresh: bool) -> list[Row] | None:
+        key = self.keys[i]
+        with self._lock:
+            recipe = self._recipes.get(key)
+        if recipe is None:
+            return None
+        try:
+            _, markup = load_markup(url, refresh, browser=bool(recipe.get("browser")))
+            rows = recipes.apply_page(recipe, markup, url, self.fields)
+        except ValueError as exc:
+            log.info("[agent] recipe failed on %s: %s", url, exc)
+            rows = []
+        with self._lock:
+            if recipes.looks_complete(recipe, rows):
+                self._fallbacks[key] = 0
+                self.uses[key] += 1
+                return rows
+            self._fallbacks[key] += 1
+            if self._fallbacks[key] >= recipes.MAX_FALLBACKS and self._recipes.pop(key, None):
+                recipes.forget(key)
+        return None
+
+    def learn(self, i: int, url: str, rows: list[Row], browser: bool) -> None:
+        key = self.keys[i]
+        with self._lock:
+            if key not in self._learn or not rows:
+                return
+            self._learn.discard(key)
+        _, markup = load_markup(url, browser=browser)
+        recipe = recipes.learn_page(markup, url, self.fields, rows)
+        if recipe:
+            recipe["browser"] = browser
+            recipes.put(key, recipe)
+            with self._lock:
+                self._recipes[key] = recipe
 
 
 def _emit_results(table: ResultsTable, emit: Emit) -> None:
@@ -433,14 +516,33 @@ def _tool_extract(args: dict[str, Any], table: ResultsTable, emit: Emit, booths:
     urls = urls[:MAX_URLS_PER_CALL]
     refresh = _flag(args, "refresh")
     instructions = str(args.get("instructions") or "")
+    # Booth rows are normalised by the booth prompt, so a recipe could never reproduce them.
+    layouts = _PageRecipes(urls, fields, refresh) if recipes.RECIPES_ENABLED and not booths else None
 
     def work(i: int) -> list[Row]:
+        url = urls[i]
         if booths:
-            return _extract_url(urls[i], refresh)
-        return _extract_url(urls[i], refresh, fields, instructions)
+            return _model_rows(url, refresh, None, "")[0]
+        rows = layouts.read(i, url, refresh) if layouts else None
+        if rows is None:
+            rows, browser = _model_rows(url, refresh, fields, instructions)
+            if layouts:
+                layouts.learn(i, url, rows, browser)
+        return _fill_urls(rows, fields, url)
 
     emit("status", {"text": f"📄 Extracting {len(urls)} page{'s' if len(urls) != 1 else ''}…"})
-    lines = _collect(urls, work, max(SCRAPE_CONCURRENCY, EXTRACT_CONCURRENCY), table, emit, "Extracted")
+    leaders = layouts.leaders() if layouts else []
+    rest = [i for i in range(len(urls)) if i not in leaders]
+    lines: list[str] = []
+    for group in (leaders, rest):
+        if group:
+            lines += _collect(
+                [urls[i] for i in group], lambda j, g=group: work(g[j]),
+                max(SCRAPE_CONCURRENCY, EXTRACT_CONCURRENCY), table, emit, "Extracted",
+            )
+    if layouts and layouts.uses:
+        recipes.record_uses(layouts.uses)
+        lines.append(f"{sum(layouts.uses.values())} pages were read with a learned page layout (no AI call).")
     if skipped:
         lines.append(f"Not processed (over the {MAX_URLS_PER_CALL}-URL limit): {len(skipped)} URLs")
     lines.append(_table_summary(table))
@@ -456,29 +558,33 @@ def _tool_find_feeds(args: dict[str, Any], emit: Emit) -> str:
     feeds = site_feeds.find_feeds(url, _flag(args, "refresh"))
     if not feeds:
         return (
-            f"No WordPress or Shopify data feed found on {site}. Use map_site to list "
-            "pages, or fetch_page to find listing pages, then extract."
+            f"No WordPress or Shopify data feed found on {site}. If the items are on a "
+            "listing or search page, try capture_api on it; otherwise use map_site or "
+            "fetch_page to find the pages, then extract."
         )
     listed = "\n".join(f.describe() for f in feeds)
     return f"Data feeds on {site} (use read_feed with the feed id):\n{listed}"
 
 
-def _record_batches(records: list[dict[str, Any]]) -> list[str]:
-    """Pack feed records into JSON-lines batches sized for one extraction call."""
-    batches: list[list[str]] = []
+def _trim(record: dict[str, Any]) -> dict[str, Any]:
+    return {k: (v[:FEED_VALUE_CHARS] if isinstance(v, str) else v) for k, v in record.items()}
+
+
+def _record_batches(records: list[dict[str, Any]]) -> list[tuple[int, str]]:
+    """Pack feed records into JSON-lines batches sized for one extraction call: (first record index, text)."""
+    batches: list[tuple[int, list[str]]] = []
     current: list[str] = []
-    size = 0
-    for record in records:
-        trimmed = {k: (v[:FEED_VALUE_CHARS] if isinstance(v, str) else v) for k, v in record.items()}
-        line = json.dumps(trimmed, ensure_ascii=False, separators=(",", ":"))
+    start = size = 0
+    for i, record in enumerate(records):
+        line = json.dumps(_trim(record), ensure_ascii=False, separators=(",", ":"))
         if current and (size + len(line) > FEED_BATCH_CHARS or len(current) >= FEED_BATCH_RECORDS):
-            batches.append(current)
-            current, size = [], 0
+            batches.append((start, current))
+            current, start, size = [], i, 0
         current.append(line)
         size += len(line) + 1
     if current:
-        batches.append(current)
-    return ["\n".join(b) for b in batches]
+        batches.append((start, current))
+    return [(s, "\n".join(lines)) for s, lines in batches]
 
 
 def _tool_read_feed(args: dict[str, Any], table: ResultsTable, emit: Emit) -> str:
@@ -500,8 +606,9 @@ def _tool_read_feed(args: dict[str, Any], table: ResultsTable, emit: Emit) -> st
     if error:
         return error
 
+    user_instructions = str(args.get("instructions") or "").strip()
     instructions = (
-        f"{args.get('instructions') or ''}\n"
+        f"{user_instructions}\n"
         "Each line is one JSON record from the site's data feed; output one row per "
         "record that matches the request."
     ).strip()
@@ -510,10 +617,57 @@ def _tool_read_feed(args: dict[str, Any], table: ResultsTable, emit: Emit) -> st
     labels = [f"{feed_id} batch {i + 1}/{len(batches)}" for i in range(len(batches))]
 
     def work(i: int) -> list[Row]:
-        return _cached_extract(f"feed:{site}|{feed_id}", batches[i], f"{site} {labels[i]}", fields, instructions, refresh)
+        return _cached_extract(f"feed:{site}|{feed_id}", batches[i][1], f"{site} {labels[i]}", fields, instructions, refresh)
 
-    lines = _collect(labels, work, EXTRACT_CONCURRENCY, table, emit, "Mapped")
+    # Instructions can filter records, which a field-to-key mapping can't.
+    use_recipe = recipes.RECIPES_ENABLED and not user_instructions and len(batches) > 1
+    recipe_key = recipes.feed_key(site, feed_id, fields)
+    recipe = recipes.get(recipe_key) if use_recipe and not refresh else None
+    learned_from_first = False
+    if use_recipe and recipe is None:
+        try:
+            first_rows = work(0)
+        except Exception as exc:
+            log.info("[agent] first %s batch failed, no feed recipe: %s", feed_id, exc)
+        else:
+            first_records = [_trim(r) for r in records[:batches[1][0]]]
+            recipe = recipes.learn_feed(first_records, first_rows, fields)
+            if recipe:
+                recipes.put(recipe_key, recipe)
+                learned_from_first = True
+
+    if recipe is None:
+        lines = _collect(labels, work, EXTRACT_CONCURRENCY, table, emit, "Mapped")
+    else:
+        # The first batch is already cached when the recipe was just learned from it.
+        lines = _collect(labels[:1], work, 1, table, emit, "Mapped") if learned_from_first else []
+        remaining = records[batches[1][0]:] if learned_from_first else records
+        rows = recipes.apply_feed(recipe, remaining, fields)
+        added, updated = table.add(rows)
+        _emit_results(table, emit)
+        recipes.record_uses({recipe_key: 1})
+        emit("status", {"text": f"⚡ Mapped {len(remaining)} records instantly with the learned field mapping"})
+        merged = f", {updated} existing rows filled in" if updated else ""
+        lines.append(f"- {len(remaining)} records mapped by field (no AI call): {len(rows)} rows, {added} new{merged}")
     return "\n".join([f"Feed {feed_id}: {len(records)} records read.", *lines, _table_summary(table)])
+
+
+def _tool_capture_api(args: dict[str, Any], emit: Emit) -> str:
+    url = str(args.get("url", "")).strip()
+    if not url:
+        return "Error: 'url' is required."
+    emit("status", {"text": f"📡 Watching the data requests of {url}"})
+    feeds = site_feeds.capture_api(url, _flag(args, "scroll"))
+    if not feeds:
+        return (
+            f"{url} made no JSON requests that return lists of records. Its data is in the "
+            "page itself: use extract on it (or map_site / fetch_page to find item pages)."
+        )
+    listed = "\n".join(f.describe() for f in feeds)
+    return (
+        f"JSON data endpoints used by {url} (read one with read_feed, feed=<id>; pick the one "
+        f"whose fields match the items the user wants):\n{listed}"
+    )
 
 
 def _tool_map_site(args: dict[str, Any], emit: Emit) -> str:
@@ -541,6 +695,8 @@ def _run_tool(name: str, args: dict[str, Any], table: ResultsTable, emit: Emit) 
         return _tool_find_feeds(args, emit)
     if name == "read_feed":
         return _tool_read_feed(args, table, emit)
+    if name == "capture_api":
+        return _tool_capture_api(args, emit)
     if name == "map_site":
         return _tool_map_site(args, emit)
     if name == "extract":
@@ -571,6 +727,8 @@ def _preamble_for(name: str, args: dict[str, Any]) -> str:
         return "Let me check whether this site publishes its data as a feed — that's the fastest route ⚡"
     if name == "read_feed":
         return "The site has a data feed, so I'll pull every record from it and fill in your columns ⚡"
+    if name == "capture_api":
+        return "Let me open that page and watch where it loads its data from — reading that directly is much faster ⚡"
     if name == "map_site":
         return "Let me read the site map to find all the pages we need 🗺️"
     if name in ("extract", "extract_booths"):
