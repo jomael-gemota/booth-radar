@@ -5,10 +5,11 @@ import { getDb } from './db.js';
 
 // ── Shared types ───────────────────────────────────────────────────────────
 
-export interface BoothEntry {
-  brand: string;
-  booth: string;
-}
+/**
+ * One results-table row. The worker always sends every column, so the column
+ * order is the key order of the first row (legacy rows are `{ brand, booth }`).
+ */
+export type ResultRow = Record<string, string>;
 
 export interface Attachment {
   id: string;
@@ -51,7 +52,7 @@ export interface ConversationDoc {
   createdAt: Date;
   updatedAt: Date;
   messages: ChatMessage[];
-  results: BoothEntry[];
+  results: ResultRow[];
 }
 
 type WorkerEventType = 'thinking' | 'token' | 'status' | 'results' | 'file' | 'done' | 'error' | 'cancelled';
@@ -107,7 +108,7 @@ export function startTurn(
   turnId: string,
   conversationId: ObjectId,
   messages: Pick<ChatMessage, 'role' | 'content'>[],
-  results: BoothEntry[],
+  results: ResultRow[],
 ): void {
   if (!workerSocket || !isWorkerConnected()) {
     throw new Error('Worker is not connected');
@@ -171,10 +172,10 @@ async function persist(turn: Turn, type: WorkerEventType, payload: unknown): Pro
     // Accumulate in-memory only — no DB write per chunk
     turn.thinkingBuffer += (payload as { text: string }).text;
   } else if (type === 'results') {
-    const { results } = payload as { results: BoothEntry[] };
+    const { results } = payload as { results: ResultRow[] };
     await col.updateOne({ _id: turn.conversationId }, { $set: { results, updatedAt: new Date() } });
   } else if (type === 'done') {
-    const { reply, results } = payload as { reply: string; results: BoothEntry[] };
+    const { reply, results } = payload as { reply: string; results: ResultRow[] };
     await Promise.allSettled(turn.pendingFiles);
     const now = new Date();
     const duration = Date.now() - turn.startedAt;
