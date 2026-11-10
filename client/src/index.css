@@ -60,6 +60,25 @@ body {
   color-scheme: light;
 }
 
+/* ── Radar Logo GIF — removes the black background via screen blending ───── */
+
+/*
+ * mix-blend-mode: screen makes black (0,0,0) fully transparent against any
+ * background, while keeping the coloured glow pixels vivid.
+ * background: transparent ensures no solid fill sits behind the GIF.
+ */
+.radar-logo {
+  mix-blend-mode: screen;
+  background: transparent;
+}
+
+/* The avatar circle that holds the logo must also be transparent so the
+   blend reaches through to the app background, not a coloured fill. */
+.msg-avatar:has(.radar-logo) {
+  background: transparent;
+  border: none;
+}
+
 /* ── Custom scrollbar ───────────────────────────────────────────────────── */
 ::-webkit-scrollbar            { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track      { background: transparent; }

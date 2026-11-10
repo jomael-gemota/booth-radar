@@ -34,10 +34,10 @@
 }
 
 .signin-logo {
-  width: 56px;
-  height: 56px;
-  border-radius: 14px;
-  object-fit: contain;
+  width: 108px;
+  height: 108px;
+  border-radius: 50%;
+  object-fit: cover;
   user-select: none;
 }
 

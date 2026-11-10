@@ -56,10 +56,10 @@
 }
 
 .sidebar-brand-icon {
-  width: 22px;
-  height: 22px;
+  width: 33px;
+  height: 33px;
   flex-shrink: 0;
-  border-radius: 6px;
+  border-radius: 50%;
   object-fit: cover;
 }
 
@@ -426,8 +426,8 @@
 /* ── Avatar ─────────────────────────────────────────────────────────────── */
 
 .msg-avatar {
-  width: 28px;
-  height: 28px;
+  width: 63px;
+  height: 63px;
   border-radius: 50%;
   background: var(--accent-dim);
   border: 1px solid rgba(124, 111, 224, 0.25);
@@ -1138,9 +1138,9 @@
 }
 
 .welcome-icon {
-  width: 64px;
-  height: 64px;
-  border-radius: 16px;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
   object-fit: cover;
   animation: icon-float 4s ease-in-out infinite;
   user-select: none;
@@ -1149,8 +1149,8 @@
 
 /* Slightly smaller icon when in the compact centered layout */
 .welcome-center .welcome-icon {
-  width: 52px;
-  height: 52px;
+  width: 78px;
+  height: 78px;
 }
 
 @keyframes icon-float {

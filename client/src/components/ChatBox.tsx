@@ -1362,9 +1362,9 @@ function CopyButton({ text }: { text: string }) {
 function RadarLogoIcon({ className }: { className?: string }) {
   return (
     <img
-      src="/logo.png"
+      src="/logo.gif"
       alt="Booth Radar"
-      className={className}
+      className={`radar-logo${className ? ` ${className}` : ''}`}
       aria-hidden="true"
       draggable={false}
     />
