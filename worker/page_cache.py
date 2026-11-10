@@ -2,7 +2,8 @@
 page_cache.py  –  In-memory TTL + LRU caches for scraped pages and extractions.
 
   * pages        – url -> (visible_text, links)
-  * extractions  – (url, sha1(page_text)) -> [{"brand": …, "booth": …}, …]
+  * extractions  – (url, sha1(page_text + field spec)) -> extracted rows
+  * feeds / feed_records / sitemaps – site_feeds.py results per origin
 
 Shared by every conversation the worker handles; cleared on worker restart.
 """
@@ -14,7 +15,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from typing import Generic, Hashable, Optional, TypeVar
+from typing import Any, Generic, Hashable, Optional, TypeVar
 from urllib.parse import urldefrag
 
 PAGE_CACHE_TTL = int(os.getenv("PAGE_CACHE_TTL", "3600"))
@@ -62,6 +63,10 @@ Rows = list[dict[str, str]]
 
 pages: TTLCache[str, tuple[str, Links]] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
 extractions: TTLCache[tuple[str, str], Rows] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
+# Site feeds and sitemaps (site_feeds.py), keyed by origin
+feeds: TTLCache[str, list[Any]] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
+feed_records: TTLCache[str, list[dict[str, Any]]] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
+sitemaps: TTLCache[str, list[str]] = TTLCache(PAGE_CACHE_TTL, PAGE_CACHE_MAX)
 
 
 def url_key(url: str) -> str:
