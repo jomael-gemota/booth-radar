@@ -9,8 +9,8 @@ import {
   isWorkerConnected,
   startTurn,
   subscribe,
-  type BoothEntry,
   type ConversationDoc,
+  type ResultRow,
 } from '../relay.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 
@@ -330,10 +330,16 @@ function escapeCsvField(value: string): string {
   return value;
 }
 
-function buildCsv(rows: BoothEntry[]): string {
-  const header = 'Brand,Booth\n';
+function columnLabel(key: string): string {
+  return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+function buildCsv(rows: ResultRow[]): string {
+  const columns = Object.keys(rows[0] ?? {});
+  const header = columns.map((c) => escapeCsvField(columnLabel(c))).join(',') + '\n';
   const body = rows
-    .map((r) => `${escapeCsvField(r.brand)},${escapeCsvField(r.booth)}`)
+    .map((r) => columns.map((c) => escapeCsvField(String(r[c] ?? ''))).join(','))
     .join('\n');
-  return header + body;
+  // BOM so Excel opens the file as UTF-8 (®, ″, accented names)
+  return '\uFEFF' + header + body;
 }

@@ -3,6 +3,9 @@ test_local.py  –  Test the worker locally without the server or WebSocket.
 
 Usage:
     python test_local.py https://example.com/exhibitors   # one-shot scrape + extract
+    python test_local.py https://example.com/item --fields "Name,Price,SKU"
+                                                           # one-shot extract of chosen fields
+    python test_local.py --feeds https://example.com       # list data feeds, read the first
     python test_local.py --chat                            # chat with the agent in the terminal
     python test_local.py --probe-api                       # probe Hermes API for thinking format
     python test_local.py --probe-server                    # discover all server endpoints + params
@@ -15,28 +18,45 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from typing import Any
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+import site_feeds
 import tool_bridge
 from agent import AGENT_TOOL_MODE, run_turn
 from extractor import extract, _get_client
 from scraper import scrape
 
 
-def scrape_once(url: str) -> None:
+def scrape_once(url: str, fields: list[str] | None = None) -> None:
     print(f"[test] scraping {url!r} …")
+    started = time.monotonic()
     page_text = scrape(url)
-    print(f"[test] got {len(page_text):,} chars")
-    print("[test] extracting …")
+    print(f"[test] got {len(page_text):,} chars in {time.monotonic() - started:.1f}s")
+    print(f"[test] extracting {fields or 'brand + booth'} …")
 
-    results = extract(page_text, url, on_token=lambda t: print(t, end="", flush=True))
+    started = time.monotonic()
+    results = extract(page_text, url, on_token=lambda t: print(t, end="", flush=True), fields=fields)
     print()  # newline after streaming output
-    print(f"\n[test] {len(results)} results:")
+    print(f"\n[test] {len(results)} results in {time.monotonic() - started:.1f}s:")
     print(json.dumps(results, indent=2, ensure_ascii=False))
+
+
+def feeds(url: str) -> None:
+    started = time.monotonic()
+    found = site_feeds.find_feeds(url)
+    print(f"[test] {len(found)} feeds in {time.monotonic() - started:.1f}s")
+    for feed in found:
+        print(feed.describe())
+    if found:
+        started = time.monotonic()
+        records = site_feeds.read_feed(url, found[0].id)
+        print(f"\n[test] {found[0].id}: {len(records)} records in {time.monotonic() - started:.1f}s; first:")
+        print(json.dumps(records[:1], indent=2, ensure_ascii=False))
 
 
 def chat() -> None:
@@ -239,10 +259,11 @@ def probe_raw(message: str | None = None) -> None:
     """
     import urllib.request
     from agent import SYSTEM_PROMPT, _context_prompt
+    from results_table import ResultsTable
 
     if message:
         messages = [
-            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{_context_prompt([])}"},
+            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{_context_prompt(ResultsTable())}"},
             {"role": "user", "content": message},
         ]
     else:
@@ -328,6 +349,10 @@ def main() -> None:
         probe_server()
     elif sys.argv[1] == "--probe-raw":
         probe_raw(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif sys.argv[1] == "--feeds" and len(sys.argv) > 2:
+        feeds(sys.argv[2])
+    elif len(sys.argv) > 3 and sys.argv[2] == "--fields":
+        scrape_once(sys.argv[1], [f.strip() for f in sys.argv[3].split(",") if f.strip()])
     else:
         scrape_once(sys.argv[1])
 

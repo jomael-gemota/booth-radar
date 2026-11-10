@@ -2,7 +2,7 @@
 extractor.py  –  Call the Hermes / OpenAI-compatible LLM.
 
   * chat_stream()  – generic streaming chat completion (used by the agent loop)
-  * extract()      – extract brand + booth listings from scraped page text
+  * extract()      – extract requested fields (or brand + booth) from page text
 """
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ import logging
 import os
 import re
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +106,7 @@ Rules:
 _client: Optional[OpenAI] = None
 _ack_client: Optional[OpenAI] = None
 _extract_client: Optional[OpenAI] = None
+_extract_params: dict[str, Any] = {"max_tokens": MAX_TOKENS, "temperature": 0}
 
 
 def quick_completion(messages: list[dict[str, str]], max_tokens: int = 120) -> str:
@@ -321,6 +322,35 @@ def _get_extract_client() -> OpenAI:
     return _extract_client
 
 
+def _open_extraction_stream(messages: list[dict[str, str]]) -> Any:
+    """
+    Start the EXTRACT_MODEL stream. Newer OpenAI models reject `max_tokens` and
+    `temperature`, while most other servers still expect `max_tokens`; whatever the
+    model refuses is adjusted once and remembered for later pages.
+    """
+    global _extract_params
+    for _ in range(3):
+        params = dict(_extract_params)
+        try:
+            return _get_extract_client().chat.completions.create(
+                model=EXTRACT_MODEL,
+                messages=messages,  # type: ignore[arg-type]
+                stream=True,
+                **params,
+            )
+        except BadRequestError as exc:
+            rejected = getattr(exc, "param", None)
+            if rejected not in params:
+                raise
+            if rejected == "max_tokens":
+                params["max_completion_tokens"] = params.pop("max_tokens")
+            else:
+                params.pop(rejected)
+            log.info("[extractor] %s rejected %r, retrying with %s", EXTRACT_MODEL, rejected, sorted(params))
+            _extract_params = params
+    raise RuntimeError(f"{EXTRACT_MODEL} rejected the extraction request parameters")
+
+
 def _extraction_completion(
     messages: list[dict[str, str]],
     on_token: Optional[Callable[[str], None]],
@@ -328,13 +358,7 @@ def _extraction_completion(
     """One plain completion on EXTRACT_MODEL, or a Hermes request when it is unset."""
     if not EXTRACT_MODEL:
         return chat_stream(messages, on_token)
-    stream = _get_extract_client().chat.completions.create(
-        model=EXTRACT_MODEL,
-        messages=messages,  # type: ignore[arg-type]
-        max_tokens=MAX_TOKENS,
-        temperature=0,
-        stream=True,
-    )
+    stream = _open_extraction_stream(messages)
     parts: list[str] = []
     with stream:
         for chunk in stream:
@@ -348,14 +372,58 @@ def _extraction_completion(
     return "".join(parts)
 
 
+GENERIC_PROMPT = """\
+You are Booth Radar, a precise web data extractor.
+
+You receive content from a public website (visible page text, optional JSON-LD
+structured data, or JSON records from the site's data feed) plus the fields the
+user wants. Extract one row per matching item.
+
+Output format (IMPORTANT — output ONLY this, no prose before or after):
+  A valid JSON array of objects with exactly these keys: {fields}
+
+Rules:
+  - Use "" when a value is not present in the source. Never guess or invent values.
+  - Copy values as written in the source (trim whitespace, decode HTML entities).
+  - A value may be derived from text that clearly states it (e.g. a height in a title).
+  - Include every matching item, with no duplicates.
+  - If nothing matches, output [].
+  - Output the raw JSON array only — no markdown fences, no explanation.
+"""
+
+
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(_as_text(v) for v in value if v not in (None, ""))
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def _parse_array(full_text: str) -> list[Any]:
+    full_text = _THINK_RE.sub("", full_text)
+    # The model may wrap the array in fences or prose; take the outermost [...]
+    start, end = full_text.find("["), full_text.rfind("]")
+    if start == -1 or end < start:
+        raise ValueError("The model did not return a JSON array")
+    results = json.loads(full_text[start:end + 1])
+    if not isinstance(results, list):
+        raise ValueError(f"Expected a JSON array, got {type(results).__name__}")
+    return results
+
+
 def extract(
     page_text: str,
     url: str,
     on_token: Optional[Callable[[str], None]] = None,
+    fields: Optional[list[str]] = None,
+    instructions: str = "",
 ) -> list[dict[str, str]]:
     """
-    Run an LLM extraction over *page_text* and return the parsed list of
-    {"brand": …, "booth": …} dicts.
+    Run an LLM extraction over *page_text*. With *fields*, returns rows with exactly
+    those keys; without, returns exhibitor {"brand": …, "booth": …} rows.
 
     Raises on LLM or JSON parse errors.
     """
@@ -367,29 +435,40 @@ def extract(
             MAX_PAGE_CHARS,
         )
 
-    user_content = (
-        f"Exhibitor website: {url}\n\n"
-        f"--- SCRAPED TEXT START ---\n{truncated}\n--- SCRAPED TEXT END ---"
-    )
+    if fields:
+        system = GENERIC_PROMPT.replace("{fields}", json.dumps(fields, ensure_ascii=False))
+        request = f"What to extract: {instructions.strip()}\n\n" if instructions.strip() else ""
+        user_content = (
+            f"Source: {url}\n{request}"
+            f"--- CONTENT START ---\n{truncated}\n--- CONTENT END ---"
+        )
+    else:
+        system = SYSTEM_PROMPT
+        user_content = (
+            f"Exhibitor website: {url}\n\n"
+            f"--- SCRAPED TEXT START ---\n{truncated}\n--- SCRAPED TEXT END ---"
+        )
 
     log.info("[extractor] extracting from %s", url)
     full_text = _extraction_completion(
         [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user",   "content": user_content},
         ],
         on_token,
     )
     log.info("[extractor] received %d chars total", len(full_text))
-    full_text = _THINK_RE.sub("", full_text)
+    results = _parse_array(full_text)
 
-    # The model may wrap the array in fences or prose; take the outermost [...]
-    start, end = full_text.find("["), full_text.rfind("]")
-    if start == -1 or end < start:
-        raise ValueError("The model did not return a JSON array")
-    results = json.loads(full_text[start:end + 1])
-    if not isinstance(results, list):
-        raise ValueError(f"Expected a JSON array, got {type(results).__name__}")
+    if fields:
+        rows = [
+            {f: _as_text(item.get(f)) for f in fields}
+            for item in results
+            if isinstance(item, dict)
+        ]
+        rows = [r for r in rows if any(r.values())]
+        log.info("[extractor] parsed %d rows", len(rows))
+        return rows
 
     normalised = []
     for item in results:

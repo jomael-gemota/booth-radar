@@ -1,9 +1,7 @@
 import { useEffect, useRef } from 'react'
 
-export interface BoothEntry {
-  brand: string
-  booth: string
-}
+/** One results-table row; column order is the key order of the first row. */
+export type ResultRow = Record<string, string>
 
 export interface Attachment {
   id: string
@@ -14,17 +12,17 @@ export interface Attachment {
 interface ThinkingPayload  { text: string }
 interface TokenPayload     { text: string }
 interface StatusPayload    { text: string }
-interface ResultsPayload   { results: BoothEntry[] }
-interface DonePayload      { reply: string; results: BoothEntry[] }
+interface ResultsPayload   { results: ResultRow[] }
+interface DonePayload      { reply: string; results: ResultRow[] }
 interface ErrorPayload     { message: string }
 
 type Handler = {
   onThinking?:  (text: string) => void
   onToken:      (text: string) => void
   onStatus:     (text: string) => void
-  onResults:    (results: BoothEntry[]) => void
+  onResults:    (results: ResultRow[]) => void
   onFile:       (file: Attachment) => void
-  onDone:       (results: BoothEntry[]) => void
+  onDone:       (results: ResultRow[]) => void
   onError:      (message: string) => void
   onCancelled?: () => void
 }

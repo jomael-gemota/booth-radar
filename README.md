@@ -3,7 +3,7 @@
 
   # Booth Radar
 
-  An internal AI-powered tool that scrapes trade-show exhibitor directories and collects brand names and booth numbers through a conversational chat interface.
+  An internal AI-powered tool that scrapes public websites — trade-show directories, product catalogs, dealer lists — for whatever details you ask for, through a conversational chat interface.
 
   ![Stack](https://img.shields.io/badge/stack-React%20%2B%20Node.js%20%2B%20Python-blue?style=flat-square)
   ![Deploy](https://img.shields.io/badge/deploy-Railway-8B5CF6?style=flat-square)
@@ -14,7 +14,7 @@
 
 ## Overview
 
-Booth Radar lets you point it at any trade-show exhibitor directory and automatically collects every brand name and booth number — no manual copy-pasting required. Results are exported as a ready-to-use CSV file.
+Booth Radar lets you point it at a public website and say what you need — exhibitor brands and booths, product names, style numbers, specs, prices, dealer locations — and collects it into a results table, no manual copy-pasting required. The columns come from your request, and results are exported as a ready-to-use CSV file.
 
 ### Architecture
 
@@ -83,7 +83,7 @@ sudo .venv/bin/playwright install --with-deps chromium
 
 ### Hermes MCP Setup
 
-With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`fetch_page`, `extract_booths`, `clear_results`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
+With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `read_feed`, `map_site`, `fetch_page`, `extract`, `extract_booths`, `clear_results`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
 
 1. In `worker/.env`, set `TOOL_BRIDGE_TOKEN` (`openssl rand -hex 32`) and, for fast page extraction, `EXTRACT_BASE_URL` / `EXTRACT_MODEL` (free option: [Ollama](https://ollama.com) on the VM, e.g. `ollama pull qwen2.5:7b-instruct`).
 2. Register the server in `~/.hermes/config.yaml` for the user Hermes runs as:
@@ -106,8 +106,16 @@ To roll back, set `AGENT_TOOL_MODE=inline` and restart the worker.
 
 ### Scraping & Cache
 
+The agent picks the fastest route for each site (see [the design log entry](design-log/2026-11-10-custom-fields-and-site-feeds.md)):
+
+1. **Data feeds** — `find_feeds` detects WordPress REST content types and Shopify `products.json`; `read_feed` pulls every record (e.g. a 115-product catalog in ~7 s) and the extraction model maps them to the requested columns in parallel batches (`EXTRACT_CONCURRENCY`, default **6**; up to `MAX_FEED_RECORDS`, default **2000**).
+2. **Sitemaps** — `map_site` lists page URLs from the site's sitemaps.
+3. **Pages** — `extract` reads each page and pulls the requested fields. Server-rendered pages are fetched over plain HTTP (`SCRAPE_HTTP_FIRST`, default on); JavaScript pages, or pages that yield no rows over HTTP, are rendered in Chromium. JSON-LD product data on the page is passed to the extractor.
+
+Rows from later calls merge into earlier ones when their key columns match (e.g. a feed gives names and URLs, then product pages fill in style numbers). Feed and sitemap requests honour `robots.txt`.
+
 - Pages are rendered on a pool of `SCRAPE_CONCURRENCY` threads (default **4**), each keeping a warm Chromium instance with images, media, and fonts blocked.
-- Scraped pages and extracted rows are cached in worker memory for `PAGE_CACHE_TTL` seconds (default **3600 s**, up to `PAGE_CACHE_MAX` entries). Follow-up questions are answered without re-scraping.
+- Scraped pages, feeds, sitemaps and extracted rows are cached in worker memory for `PAGE_CACHE_TTL` seconds (default **3600 s**, up to `PAGE_CACHE_MAX` entries). Follow-up questions are answered without re-scraping.
 - The cache clears on worker restart. Set `PAGE_CACHE_TTL=0` to disable it.
 
 ### File Downloads
@@ -123,6 +131,8 @@ Test the agent in a terminal without the server:
 
 ```bash
 .venv/bin/python test_local.py --chat
+.venv/bin/python test_local.py --feeds https://thorogoodusa.com           # list and read site data feeds
+.venv/bin/python test_local.py https://example.com/item --fields "Name,Price,SKU"
 ```
 
 ---

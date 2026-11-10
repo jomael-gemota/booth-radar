@@ -14,7 +14,7 @@ function useTheme(): { theme: Theme; toggleTheme: () => void } {
   }, [theme])
   return { theme, toggleTheme: () => setTheme((t) => (t === 'dark' ? 'light' : 'dark')) }
 }
-import { useStream, type Attachment, type BoothEntry } from '../hooks/useStream'
+import { useStream, type Attachment, type ResultRow } from '../hooks/useStream'
 import { logout, type AuthUser } from '../hooks/useAuth'
 import AccountPage from './AccountPage'
 import UserLogsPage from './UserLogsPage'
@@ -45,7 +45,7 @@ interface ConversationSummary {
 interface ConversationResponse {
   id: string
   messages: { role: 'user' | 'assistant' | 'thinking'; content: string; attachments?: Attachment[]; duration?: number }[]
-  results: BoothEntry[]
+  results: ResultRow[]
   activeTurnId: string | null
 }
 
@@ -64,7 +64,7 @@ const WELCOME: Message = { id: 'welcome', role: 'assistant', text: '' }
 function getStaticGreeting(name?: string): { greeting: string; subtext: string } {
   const hour   = new Date().getHours()
   const suffix = name ? `, ${name}` : ''
-  const sub    = "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you."
+  const sub    = "Point me at any public website and tell me what to collect — exhibitors, products, prices, dealers — as a CSV."
   if (hour >= 5  && hour < 12) return { greeting: `Good morning${suffix}! I'm Booth Radar.`, subtext: sub }
   if (hour >= 12 && hour < 17) return { greeting: `Good afternoon${suffix}! I'm Booth Radar.`, subtext: sub }
   if (hour >= 17 && hour < 21) return { greeting: `Good evening${suffix}! I'm Booth Radar.`, subtext: sub }
@@ -134,7 +134,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   const [input,           setInput]           = useState('')
   const [conversationId,  setConversationId]  = useState<string | null>(null)
   const [turnId,   setTurnId]   = useState<string | null>(null)
-  const [results,  setResults]  = useState<BoothEntry[]>([])
+  const [results,  setResults]  = useState<ResultRow[]>([])
   const [busy,       setBusy]       = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [loadingConv, setLoadingConv] = useState(false)
@@ -821,7 +821,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
                   {results.length > 0 && conversationId && (
                     <div className="results-block">
                       <p className="results-label">
-                        📊 {results.length} exhibitor{results.length !== 1 ? 's' : ''} collected
+                        📊 {results.length} row{results.length !== 1 ? 's' : ''} collected
                       </p>
                       <ResultsTable results={results} />
                       <ExportButton conversationId={conversationId} />
@@ -1234,23 +1234,26 @@ function TypingIndicator() {
 
 // ── ResultsTable ─────────────────────────────────────────────────────────────
 
-function ResultsTable({ results }: { results: BoothEntry[] }) {
+function columnLabel(key: string): string {
+  return key.charAt(0).toUpperCase() + key.slice(1)
+}
+
+function ResultsTable({ results }: { results: ResultRow[] }) {
+  const columns = Object.keys(results[0] ?? {})
   return (
     <div className="results-table-wrap">
       <table className="results-table">
         <thead>
           <tr>
             <th>#</th>
-            <th>Brand</th>
-            <th>Booth</th>
+            {columns.map((c) => <th key={c}>{columnLabel(c)}</th>)}
           </tr>
         </thead>
         <tbody>
           {results.map((r, i) => (
             <tr key={i}>
               <td>{i + 1}</td>
-              <td>{r.brand}</td>
-              <td>{r.booth}</td>
+              {columns.map((c) => <td key={c}>{r[c]}</td>)}
             </tr>
           ))}
         </tbody>

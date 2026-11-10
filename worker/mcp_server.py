@@ -26,8 +26,10 @@ BRIDGE_TIMEOUT = float(os.getenv("TOOL_BRIDGE_TIMEOUT", "900"))
 server = MCPServer(
     "booth-radar",
     instructions=(
-        "Booth Radar's website tools. Always pass the `turn` id given in your "
-        "instructions. Use these tools for every website request."
+        "Booth Radar's website data tools. Always pass the `turn` id given in your "
+        "instructions. Use these tools for every website request: find_feeds first, "
+        "read_feed when a feed has the items, otherwise map_site or fetch_page to "
+        "find pages and extract."
     ),
 )
 
@@ -55,21 +57,85 @@ async def _call(name: str, turn: str, **args: Any) -> str:
 
 
 @server.tool(structured_output=False)
-async def fetch_page(url: str, turn: str = "", offset: int = 0, refresh: bool = False) -> str:
+async def find_feeds(url: str, turn: str = "", refresh: bool = False) -> str:
     """
-    Load a web page in a headless browser and return its visible text and links.
-    Use it to understand a site, find the exhibitor directory, and discover pagination
-    or A–Z letter pages before extracting. Long pages are cut; pass `offset` to read
-    further. Recently loaded pages are cached; set `refresh` only for fresh data.
+    Check whether a site publishes its content as a data feed (WordPress REST API,
+    Shopify products.json) and list each feed with its record count and fields.
+    Takes seconds; call it first on any new site.
     """
-    return await _call("fetch_page", turn, url=url, offset=offset, refresh=refresh)
+    return await _call("find_feeds", turn, url=url, refresh=refresh)
+
+
+@server.tool(structured_output=False)
+async def read_feed(
+    url: str,
+    feed: str,
+    fields: list[str],
+    turn: str = "",
+    instructions: str = "",
+    key_fields: list[str] | None = None,
+    replace: bool = False,
+    refresh: bool = False,
+) -> str:
+    """
+    Read every record of one feed (id from find_feeds) and fill the user's results
+    table with the requested fields. Fastest way to collect a whole catalog or list.
+    """
+    return await _call(
+        "read_feed", turn, url=url, feed=feed, fields=fields, instructions=instructions,
+        key_fields=key_fields or [], replace=replace, refresh=refresh,
+    )
+
+
+@server.tool(structured_output=False)
+async def map_site(url: str, turn: str = "", include: str = "", limit: int = 200, refresh: bool = False) -> str:
+    """
+    List page URLs from the site's sitemaps, filtered to URLs containing `include`
+    (e.g. "/product/"). Finds all item pages without clicking through categories.
+    """
+    return await _call("map_site", turn, url=url, include=include, limit=limit, refresh=refresh)
+
+
+@server.tool(structured_output=False)
+async def fetch_page(
+    url: str, turn: str = "", offset: int = 0, refresh: bool = False, browser: bool = False,
+) -> str:
+    """
+    Load a web page and return its visible text, links and JSON-LD structured data.
+    Use it to understand a site and discover pagination or letter pages. Long pages
+    are cut; pass `offset` to read further. Set `browser` if content looks missing
+    (JavaScript-rendered page). Recently loaded pages are cached; set `refresh` only
+    for fresh data.
+    """
+    return await _call("fetch_page", turn, url=url, offset=offset, refresh=refresh, browser=browser)
+
+
+@server.tool(structured_output=False)
+async def extract(
+    urls: list[str],
+    fields: list[str],
+    turn: str = "",
+    instructions: str = "",
+    key_fields: list[str] | None = None,
+    refresh: bool = False,
+    replace: bool = False,
+) -> str:
+    """
+    Scrape each URL in parallel and extract one row per matching item with the
+    requested fields (e.g. ["Product Name", "Price", "URL"]) into the user's results
+    table. Rows matching existing ones on `key_fields` fill in their empty cells.
+    """
+    return await _call(
+        "extract", turn, urls=urls, fields=fields, instructions=instructions,
+        key_fields=key_fields or [], refresh=refresh, replace=replace,
+    )
 
 
 @server.tool(structured_output=False)
 async def extract_booths(urls: list[str], turn: str = "", refresh: bool = False) -> str:
     """
-    Scrape each URL and extract every exhibitor brand and booth into the user's
-    results table (duplicates are skipped). Pages are processed in parallel.
+    Trade-show shortcut: scrape each URL and extract every exhibitor brand and booth
+    into the user's results table. Pages are processed in parallel.
     """
     return await _call("extract_booths", turn, urls=urls, refresh=refresh)
 

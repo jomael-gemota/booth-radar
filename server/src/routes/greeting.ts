@@ -33,7 +33,7 @@ function buildFallback(period: Period, name: string): GreetingPayload {
     : `${prefix[period]}! I'm Booth Radar.`;
   return {
     greeting,
-    subtext: "Point me at a trade-show exhibitor directory and I'll collect brands and booth numbers for you.",
+    subtext: "Point me at any public website and tell me what to collect — exhibitors, products, prices, dealers — as a CSV.",
   };
 }
 
@@ -83,7 +83,8 @@ async function fetchGreeting(period: Period, name: string): Promise<GreetingPayl
           role:    'system',
           content:
             'You are the welcome screen of Booth Radar, an internal tool that scrapes ' +
-            'trade-show exhibitor directories to collect brand names and booth locations. ' +
+            'public websites to collect whatever data the user asks for: trade-show exhibitors ' +
+            'and booths, product catalogs, specs, prices and dealer lists. ' +
             'Write in clear, natural, professional English. No wordplay, no slogans, no cleverness.',
         },
         {
@@ -94,7 +95,7 @@ async function fetchGreeting(period: Period, name: string): Promise<GreetingPayl
             'Rules:\n' +
             `- greeting: use a proper time-appropriate salutation${name ? ` and address the user as "${name}"` : ''} ` +
             '(e.g. "Good morning, Alex! Welcome back to Booth Radar."). Maximum 12 words.\n' +
-            '- subtext: one clear sentence, 15–20 words, describing what the tool does in plain English — scraping exhibitor directories, collecting brands and booth numbers, exporting as CSV.\n' +
+            '- subtext: one clear sentence, 15–20 words, describing what the tool does in plain English — scraping any public website for the details the user asks for (exhibitors, products, prices, dealers), exporting as CSV.\n' +
             'Respond only with valid JSON: {"greeting": "...", "subtext": "..."}',
         },
       ],

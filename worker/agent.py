@@ -20,9 +20,11 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 import page_cache
+import site_feeds
 import tool_bridge
 from extractor import chat_stream, extract, quick_completion
-from scraper import SCRAPE_CONCURRENCY, load_page, scrape
+from results_table import ResultsTable
+from scraper import SCRAPE_CONCURRENCY, load_page, scrape, used_browser
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +37,18 @@ ACK_WAIT_SECONDS     = float(os.getenv("ACK_WAIT_SECONDS", "4"))
 ACK_HISTORY_MESSAGES = 6
 AGENT_PAGE_CHARS     = int(os.getenv("AGENT_PAGE_CHARS", "12000"))
 MAX_URLS_PER_CALL    = int(os.getenv("MAX_URLS_PER_CALL", "40"))
+# Parallel extraction-model calls (pages and feed batches)
+EXTRACT_CONCURRENCY  = max(1, int(os.getenv("EXTRACT_CONCURRENCY", "6")))
+FEED_BATCH_CHARS     = 12000
+FEED_BATCH_RECORDS   = 40
+FEED_VALUE_CHARS     = 600
+MAX_MAP_URLS         = 1000
 HISTORY_CONTEXT_ROWS = 200
+HISTORY_ROW_CHARS    = 300
+
+BOOTH_FIELDS = ("brand", "booth")
+# Columns filled with the page URL when the extractor leaves them empty
+_URL_FIELDS = {"url", "link", "page url", "product url", "source url"}
 
 Emit = Callable[[str, dict[str, Any]], None]
 Row = dict[str, str]
@@ -48,14 +61,16 @@ TOOL_OPEN = "<tool>"
 _TOOL_RE = re.compile(r"<tool>\s*(.*?)\s*(?:</tool>|$)", re.DOTALL)
 
 _PERSONA = """\
-You are Booth Radar, a friendly assistant that helps the team collect exhibitor
-brands and their booth locations from trade-show websites. You are genuinely
+You are Booth Radar, a friendly assistant that helps the team collect data from
+public websites: trade-show exhibitors and booths, product catalogs, specs,
+dealer and store lists — whatever details the user asks for. You are genuinely
 conversational — you talk WITH the user, not just at them.
 
 Personality:
 - You are warm, upbeat, and genuinely happy to help. You enjoy hunting down
-  booths and it shows: greet people cheerfully, celebrate finished scrapes
-  ("Done! Found 312 brands across 10 pages 🎉"), and thank users for their requests.
+  data and it shows: greet people cheerfully, celebrate finished scrapes
+  ("Done! Collected 115 products with style numbers and heights 🎉"), and thank
+  users for their requests.
 - Sound like an enthusiastic teammate, not a robot. Use a natural, positive tone,
   exclamation points now and then, and at most one or two emoji per reply.
 - Stay cheerful when things go wrong: explain failures honestly and kindly, and
@@ -79,8 +94,8 @@ Good examples:
   "Looks like there are 10 letter tabs (A–Z minus a few). I'll scrape all of
    them so we get the complete list — this might take a minute or two!"
 
-  "Before I extract, let me quickly fetch the overview page to make sure I'm
-   grabbing the right exhibitor section and not a sponsor list."
+  "Let me first check whether the site publishes its product catalog as a data
+   feed — that would be way faster than opening every page one by one ⚡"
 
 Bad (do NOT do this): jumping straight into a tool call with no message, or
 writing only "Fetching..." before the call — that's not conversational.
@@ -92,6 +107,78 @@ After EVERY tool result, if you are about to use another tool, explain what
 you learned and what you are going to do next before calling the next tool.
 """
 
+# (name, inline JSON args, MCP signature, description)
+_TOOL_DOCS: list[tuple[str, str, str, str]] = [
+    (
+        "find_feeds",
+        '{"url": "https://..."}',
+        "find_feeds(url)",
+        "Checks whether the site publishes its content as a data feed (WordPress\n"
+        "REST API, Shopify products.json) and lists each feed with its record count\n"
+        "and fields. Takes seconds. Call it first on any new site.",
+    ),
+    (
+        "read_feed",
+        '{"url": "https://...", "feed": "wp:product", "fields": ["Product Name", "URL"], '
+        '"instructions": "", "key_fields": [], "replace": false}',
+        'read_feed(url, feed, fields, instructions="", key_fields=[], replace=false)',
+        "Reads every record of one feed and fills the results table with the\n"
+        "requested fields. Fastest way to collect a whole catalog or list. Feeds\n"
+        "often lack details only shown on each item's page (specs, prices): collect\n"
+        "the URLs here, then extract those pages for the missing fields.",
+    ),
+    (
+        "map_site",
+        '{"url": "https://...", "include": "", "limit": 200}',
+        'map_site(url, include="", limit=200)',
+        "Lists page URLs from the site's sitemaps, filtered to URLs containing\n"
+        "`include` (e.g. \"/product/\"). Use it to find all item pages without clicking\n"
+        "through category pages.",
+    ),
+    (
+        "fetch_page",
+        '{"url": "https://...", "offset": 0, "refresh": false, "browser": false}',
+        "fetch_page(url, offset=0, refresh=false, browser=false)",
+        "Loads a page and returns its visible text, links and any JSON-LD structured\n"
+        "data. Use it to understand a site and discover pagination or letter pages.\n"
+        f"Long pages are cut at {AGENT_PAGE_CHARS:,} chars; pass offset to read further.\n"
+        "Set browser=true if content looks missing (JavaScript-rendered page).",
+    ),
+    (
+        "extract",
+        '{"urls": ["https://...", ...], "fields": ["Product Name", "Price"], '
+        '"instructions": "", "key_fields": [], "refresh": false, "replace": false}',
+        'extract(urls, fields, instructions="", key_fields=[], refresh=false, replace=false)',
+        "Scrapes each URL in parallel and extracts one row per matching item with\n"
+        "the requested fields into the results table. Use `instructions` to say which\n"
+        f"items count or how to read a value. Max {MAX_URLS_PER_CALL} URLs per call;\n"
+        "call it again for more.",
+    ),
+    (
+        "extract_booths",
+        '{"urls": ["https://...", ...], "refresh": false}',
+        "extract_booths(urls, refresh=false)",
+        "Trade-show shortcut: extracts every exhibitor brand + booth from each URL.\n"
+        f"Max {MAX_URLS_PER_CALL} URLs per call.",
+    ),
+    (
+        "clear_results",
+        "{}",
+        "clear_results()",
+        "Empties the results table.",
+    ),
+]
+
+
+def _tool_list(mcp: bool) -> str:
+    lines = []
+    for name, inline_args, signature, description in _TOOL_DOCS:
+        head = signature if mcp else f"{name}  {inline_args}"
+        body = "\n".join(f"    {line}" for line in description.splitlines())
+        lines.append(f"- {head}\n{body}")
+    return "\n".join(lines)
+
+
 _INLINE_TOOLS = f"""
 ────────────────────────────────────────────────────────────
 Tools
@@ -102,17 +189,7 @@ one block and STOP:
 <tool>{{"name": "<tool name>", "args": {{...}}}}</tool>
 
 Available tools:
-- fetch_page  {{"url": "https://...", "offset": 0, "refresh": false}}
-    Loads a page in a headless browser and returns its visible text and links.
-    Use it to understand a site, find the exhibitor directory, and discover
-    pagination or A–Z letter pages before extracting. Long pages are cut at
-    {AGENT_PAGE_CHARS:,} chars; pass "offset" to read further.
-- extract_booths  {{"urls": ["https://...", ...], "refresh": false}}
-    Scrapes each URL and extracts every exhibitor brand + booth. Rows are added
-    to the results table the user can export as CSV (duplicates are skipped).
-    Max {MAX_URLS_PER_CALL} URLs per call; call it again for more.
-- clear_results  {{}}
-    Empties the results table.
+{_tool_list(mcp=False)}
 
 After each tool call you will receive a <tool_result> message. Continue until
 the user's request is done, then reply in plain text WITHOUT a tool block.
@@ -127,36 +204,42 @@ Tools
 Use the booth-radar tools for every website request — never another browser,
 terminal or code tool. Pass turn="{turn_id}" on EVERY booth-radar call.
 
-- fetch_page(url, offset=0, refresh=false)
-    Loads a page and returns its visible text and links. Use it to understand a
-    site and discover pagination or A–Z letter pages. Long pages are cut at
-    {AGENT_PAGE_CHARS:,} chars; pass offset to read further.
-- extract_booths(urls, refresh=false)
-    Extracts every exhibitor brand + booth from each URL into the results table
-    (duplicates skipped). Max {MAX_URLS_PER_CALL} URLs per call; call again for more.
-- clear_results()
-    Empties the results table.
+{_tool_list(mcp=True)}
 """
 
 
 _GUIDELINES = """
-Pages loaded in the last hour are cached and return instantly. To answer
-follow-up questions about a site (other details on a page, a page you already
-looked at), call fetch_page again instead of guessing. Only set refresh to true
-when the user asks for fresh or updated data.
+────────────────────────────────────────────────────────────
+How to scrape fast
+────────────────────────────────────────────────────────────
+1. New site: call find_feeds. If a feed holds the items the user wants,
+   read_feed collects all of them in seconds.
+2. Need details the feed lacks (or no feed): get the item URLs from the feed
+   rows, map_site, or a listing page, then extract them in batches.
+3. Only use fetch_page to understand a site's layout or answer a question.
+
+Fields: take them from the user's request as short, human-readable column
+names ("Product Name", "Style Number", "Height", "Price", "URL"). Include "URL"
+when rows come from different pages. Keep the same names when adding more
+details to the same rows later, so they merge into one table. Use key_fields to
+say which columns identify a row (e.g. ["URL"] or ["Style Number"]).
+
+Pages, feeds and sitemaps loaded in the last hour are cached and return
+instantly. To answer follow-up questions, call the tool again instead of
+guessing. Only set refresh to true when the user asks for fresh data.
 
 ────────────────────────────────────────────────────────────
 Guidelines
 ────────────────────────────────────────────────────────────
 - If the user just chats or asks a question, answer directly without tools.
-- When a directory is split across pages (letters, page numbers, categories),
+- When a list is split across pages (letters, page numbers, categories),
   build the full list of URLs and extract all of them, unless the user asked
   for only some.
-- Never invent brands or booths. Only report what the tools returned.
+- Never invent data. Only report what the tools returned.
 - When finished, summarise what was collected: which site, how many rows,
-  which pages were covered, and any pages that failed.
+  which columns, and any pages that failed.
 - Only mention the results table or its Export CSV button if you added rows
-  with extract_booths in this turn.
+  in this turn.
 - Never mention file paths, folders, the server, your tools, or which actions
   were or weren't available. Speak only about the results and the user's request.
 - Keep replies concise — conversational does not mean verbose.
@@ -212,8 +295,13 @@ class _ToolBlockFilter:
 
 # ── Tools ──────────────────────────────────────────────────────────────────
 
-def _row_key(row: Row) -> tuple[str, str]:
-    return row["brand"].casefold(), row["booth"].casefold()
+def _str_list(value: Any) -> list[str]:
+    """Accept a list or a comma-separated string; drop blanks."""
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, list):
+        return []
+    return [str(v).strip() for v in value if str(v).strip()]
 
 
 def _flag(args: dict[str, Any], name: str) -> bool:
@@ -234,7 +322,7 @@ def _tool_fetch_page(args: dict[str, Any], emit: Emit) -> str:
     refresh = _flag(args, "refresh")
 
     emit("status", {"text": f"🔍 Loading {url}"})
-    text, links, cached = load_page(url, refresh)
+    text, links, cached = load_page(url, refresh, browser=_flag(args, "browser"))
     shown = text[offset:offset + AGENT_PAGE_CHARS]
     end = offset + len(shown)
     note = ""
@@ -250,90 +338,221 @@ def _tool_fetch_page(args: dict[str, Any], emit: Emit) -> str:
     )
 
 
-def _extract_url(url: str, refresh: bool) -> list[Row]:
-    text = scrape(url, refresh)
-    key = (page_cache.url_key(url), page_cache.text_hash(text))
+def _cached_extract(
+    cache_url: str, text: str, label: str, fields: list[str] | None, instructions: str, refresh: bool,
+) -> list[Row]:
+    spec = json.dumps([fields, instructions]) if fields else ""
+    key = (cache_url, page_cache.text_hash(text + spec))
     rows = None if refresh else page_cache.extractions.get(key)
     if rows is None:
-        rows = extract(text, url)
+        rows = extract(text, label, fields=fields, instructions=instructions)
         page_cache.extractions.set(key, rows)
     else:
-        log.info("[agent] extraction cache hit for %s", url)
+        log.info("[agent] extraction cache hit for %s", label)
     return [dict(r) for r in rows]
 
 
-def _tool_extract_booths(args: dict[str, Any], results: list[Row], emit: Emit) -> str:
-    urls = args.get("urls")
-    if isinstance(urls, str):
-        urls = [urls]
-    if not isinstance(urls, list) or not urls:
-        return "Error: 'urls' must be a non-empty list of URLs."
-    urls = [str(u).strip() for u in urls if str(u).strip()]
-    if not urls:
-        return "Error: 'urls' must be a non-empty list of URLs."
-    skipped = urls[MAX_URLS_PER_CALL:]
-    urls = urls[:MAX_URLS_PER_CALL]
-    refresh = _flag(args, "refresh")
+def _extract_url(url: str, refresh: bool, fields: list[str] | None = None, instructions: str = "") -> list[Row]:
+    key = page_cache.url_key(url)
+    rows = _cached_extract(key, scrape(url, refresh), url, fields, instructions, refresh)
+    if not rows and not used_browser(url):
+        # The plain HTTP copy may lack JavaScript-loaded content; try the rendered page.
+        log.info("[agent] no rows from plain fetch of %s, rendering in the browser", url)
+        rows = _cached_extract(key, scrape(url, refresh, browser=True), url, fields, instructions, refresh)
+    for name in fields or []:
+        if name.casefold() in _URL_FIELDS:
+            for row in rows:
+                row[name] = row.get(name) or url
+    return rows
 
-    existing = {_row_key(r) for r in results}
+
+def _emit_results(table: ResultsTable, emit: Emit) -> None:
+    emit("results", {"results": table.snapshot()})
+
+
+def _collect(
+    labels: list[str],
+    work: Callable[[int], list[Row]],
+    workers: int,
+    table: ResultsTable,
+    emit: Emit,
+    verb: str,
+) -> list[str]:
+    """Run *work* for each label in parallel and merge rows into *table* in label order."""
     lines: list[str] = []
     outcomes: dict[int, list[Row] | Exception] = {}
     next_to_merge = 0
 
-    def merge_ready() -> None:
-        # Merge in URL order so de-duplication matches sequential processing.
+    def merge_ready() -> bool:
+        # Merge in label order so de-duplication matches sequential processing.
         nonlocal next_to_merge
+        changed = False
         while next_to_merge in outcomes:
-            url, outcome = urls[next_to_merge], outcomes.pop(next_to_merge)
+            label, outcome = labels[next_to_merge], outcomes.pop(next_to_merge)
             next_to_merge += 1
             if isinstance(outcome, Exception):
-                lines.append(f"- {url}: FAILED ({outcome})")
+                lines.append(f"- {label}: FAILED ({outcome})")
                 continue
-            added = 0
-            for row in outcome:
-                key = _row_key(row)
-                if key not in existing:
-                    existing.add(key)
-                    results.append(row)
-                    added += 1
-            lines.append(f"- {url}: {len(outcome)} rows found, {added} new")
+            added, updated = table.add(outcome)
+            changed = changed or bool(added or updated)
+            merged = f", {updated} existing rows filled in" if updated else ""
+            lines.append(f"- {label}: {len(outcome)} rows found, {added} new{merged}")
+        return changed
 
-    emit("status", {"text": f"📄 Extracting {len(urls)} page{'s' if len(urls) != 1 else ''}…"})
-    with ThreadPoolExecutor(max_workers=min(SCRAPE_CONCURRENCY, len(urls))) as pool:
-        futures: dict[Future[list[Row]], int] = {
-            pool.submit(_extract_url, url, refresh): i for i, url in enumerate(urls)
-        }
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(labels)))) as pool:
+        futures: dict[Future[list[Row]], int] = {pool.submit(work, i): i for i in range(len(labels))}
         for done, future in enumerate(as_completed(futures), 1):
             i = futures[future]
             try:
                 outcomes[i] = future.result()
-                emit("status", {"text": f"📄 Extracted {done}/{len(urls)}: {urls[i]}"})
+                emit("status", {"text": f"📄 {verb} {done}/{len(labels)}: {labels[i]}"})
             except Exception as exc:
-                log.warning("[agent] extract failed for %s: %s", urls[i], exc)
+                log.warning("[agent] %s failed for %s: %s", verb.lower(), labels[i], exc)
                 outcomes[i] = exc
-                emit("status", {"text": f"⚠️ Failed {done}/{len(urls)}: {urls[i]}"})
-            before = len(results)
-            merge_ready()
-            if len(results) != before:
-                emit("results", {"results": list(results)})
+                emit("status", {"text": f"⚠️ Failed {done}/{len(labels)}: {labels[i]}"})
+            if merge_ready():
+                _emit_results(table, emit)
+    return lines
 
+
+def _table_summary(table: ResultsTable) -> str:
+    return f"Results table now has {len(table)} rows with columns {table.columns}."
+
+
+def _tool_extract(args: dict[str, Any], table: ResultsTable, emit: Emit, booths: bool = False) -> str:
+    urls = _str_list(args.get("urls"))
+    if not urls:
+        return "Error: 'urls' must be a non-empty list of URLs."
+    fields = list(BOOTH_FIELDS) if booths else _str_list(args.get("fields"))
+    if not fields:
+        return "Error: 'fields' is required, e.g. [\"Product Name\", \"Price\"]."
+    error = table.prepare(fields, _str_list(args.get("key_fields")) or None, _flag(args, "replace"))
+    if error:
+        return error
+    skipped = urls[MAX_URLS_PER_CALL:]
+    urls = urls[:MAX_URLS_PER_CALL]
+    refresh = _flag(args, "refresh")
+    instructions = str(args.get("instructions") or "")
+
+    def work(i: int) -> list[Row]:
+        if booths:
+            return _extract_url(urls[i], refresh)
+        return _extract_url(urls[i], refresh, fields, instructions)
+
+    emit("status", {"text": f"📄 Extracting {len(urls)} page{'s' if len(urls) != 1 else ''}…"})
+    lines = _collect(urls, work, max(SCRAPE_CONCURRENCY, EXTRACT_CONCURRENCY), table, emit, "Extracted")
     if skipped:
         lines.append(f"Not processed (over the {MAX_URLS_PER_CALL}-URL limit): {len(skipped)} URLs")
-    lines.append(f"Results table now has {len(results)} rows.")
+    lines.append(_table_summary(table))
     return "\n".join(lines)
 
 
-def _run_tool(name: str, args: dict[str, Any], results: list[Row], emit: Emit) -> str:
+def _tool_find_feeds(args: dict[str, Any], emit: Emit) -> str:
+    url = str(args.get("url", "")).strip()
+    if not url:
+        return "Error: 'url' is required."
+    site = site_feeds.origin(url)
+    emit("status", {"text": f"⚡ Checking {site} for data feeds"})
+    feeds = site_feeds.find_feeds(url, _flag(args, "refresh"))
+    if not feeds:
+        return (
+            f"No WordPress or Shopify data feed found on {site}. Use map_site to list "
+            "pages, or fetch_page to find listing pages, then extract."
+        )
+    listed = "\n".join(f.describe() for f in feeds)
+    return f"Data feeds on {site} (use read_feed with the feed id):\n{listed}"
+
+
+def _record_batches(records: list[dict[str, Any]]) -> list[str]:
+    """Pack feed records into JSON-lines batches sized for one extraction call."""
+    batches: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for record in records:
+        trimmed = {k: (v[:FEED_VALUE_CHARS] if isinstance(v, str) else v) for k, v in record.items()}
+        line = json.dumps(trimmed, ensure_ascii=False, separators=(",", ":"))
+        if current and (size + len(line) > FEED_BATCH_CHARS or len(current) >= FEED_BATCH_RECORDS):
+            batches.append(current)
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + 1
+    if current:
+        batches.append(current)
+    return ["\n".join(b) for b in batches]
+
+
+def _tool_read_feed(args: dict[str, Any], table: ResultsTable, emit: Emit) -> str:
+    url = str(args.get("url", "")).strip()
+    feed_id = str(args.get("feed", "")).strip()
+    fields = _str_list(args.get("fields"))
+    if not url or not feed_id:
+        return "Error: 'url' and 'feed' are required (feed ids come from find_feeds)."
+    if not fields:
+        return "Error: 'fields' is required, e.g. [\"Product Name\", \"URL\"]."
+    refresh = _flag(args, "refresh")
+    site = site_feeds.origin(url)
+
+    emit("status", {"text": f"⚡ Reading the {feed_id} feed from {site}"})
+    records = site_feeds.read_feed(url, feed_id, refresh)
+    if not records:
+        return f"The {feed_id} feed returned no records."
+    error = table.prepare(fields, _str_list(args.get("key_fields")) or None, _flag(args, "replace"))
+    if error:
+        return error
+
+    instructions = (
+        f"{args.get('instructions') or ''}\n"
+        "Each line is one JSON record from the site's data feed; output one row per "
+        "record that matches the request."
+    ).strip()
+    batches = _record_batches(records)
+    emit("status", {"text": f"⚡ Got {len(records)} records, filling in your columns…"})
+    labels = [f"{feed_id} batch {i + 1}/{len(batches)}" for i in range(len(batches))]
+
+    def work(i: int) -> list[Row]:
+        return _cached_extract(f"feed:{site}|{feed_id}", batches[i], f"{site} {labels[i]}", fields, instructions, refresh)
+
+    lines = _collect(labels, work, EXTRACT_CONCURRENCY, table, emit, "Mapped")
+    return "\n".join([f"Feed {feed_id}: {len(records)} records read.", *lines, _table_summary(table)])
+
+
+def _tool_map_site(args: dict[str, Any], emit: Emit) -> str:
+    url = str(args.get("url", "")).strip()
+    if not url:
+        return "Error: 'url' is required."
+    include = str(args.get("include") or "")
+    try:
+        limit = min(MAX_MAP_URLS, max(1, int(args.get("limit") or 200)))
+    except (TypeError, ValueError):
+        return "Error: 'limit' must be a whole number."
+    emit("status", {"text": f"🗺️ Reading the sitemap of {site_feeds.origin(url)}"})
+    urls, total = site_feeds.map_site(url, include, limit, _flag(args, "refresh"))
+    if not total:
+        where = f" containing {include!r}" if include else ""
+        return f"No sitemap URLs{where} found. Use fetch_page to find listing pages instead."
+    shown = f" (showing {len(urls)}; raise limit or narrow include for more)" if len(urls) < total else ""
+    return f"{total} sitemap URLs{f' containing {include!r}' if include else ''}{shown}:\n" + "\n".join(urls)
+
+
+def _run_tool(name: str, args: dict[str, Any], table: ResultsTable, emit: Emit) -> str:
     if name == "fetch_page":
         return _tool_fetch_page(args, emit)
+    if name == "find_feeds":
+        return _tool_find_feeds(args, emit)
+    if name == "read_feed":
+        return _tool_read_feed(args, table, emit)
+    if name == "map_site":
+        return _tool_map_site(args, emit)
+    if name == "extract":
+        return _tool_extract(args, table, emit)
     if name == "extract_booths":
-        return _tool_extract_booths(args, results, emit)
+        return _tool_extract(args, table, emit, booths=True)
     if name == "clear_results":
-        results.clear()
+        table.clear()
         emit("status", {"text": "🧹 Cleared the results table"})
-        emit("results", {"results": list(results)})
+        _emit_results(table, emit)
         return "Results table cleared (0 rows)."
-    return f"Error: unknown tool {name!r}. Available: fetch_page, extract_booths, clear_results."
+    return f"Error: unknown tool {name!r}. Available: {', '.join(d[0] for d in _TOOL_DOCS)}."
 
 
 # ── Preambles ──────────────────────────────────────────────────────────────
@@ -348,22 +567,28 @@ def _preamble_for(name: str, args: dict[str, Any]) -> str:
         if args.get("offset"):
             return f"Let me read a bit further down {url} 📖"
         return f"Let me open {url} and see how it's laid out 🔍"
-    if name == "extract_booths":
-        urls = args.get("urls")
-        count = 1 if isinstance(urls, str) else len(urls) if isinstance(urls, list) else 0
+    if name == "find_feeds":
+        return "Let me check whether this site publishes its data as a feed — that's the fastest route ⚡"
+    if name == "read_feed":
+        return "The site has a data feed, so I'll pull every record from it and fill in your columns ⚡"
+    if name == "map_site":
+        return "Let me read the site map to find all the pages we need 🗺️"
+    if name in ("extract", "extract_booths"):
+        count = len(_str_list(args.get("urls")))
+        what = "the brands and booth numbers" if name == "extract_booths" else "the details you asked for"
         if count > 1:
-            return f"Great, I'll collect the brands and booth numbers from {count} pages now — this may take a moment! 📄"
-        return "Great, I'll collect the brands and booth numbers from that page now 📄"
+            return f"Great, I'll collect {what} from {count} pages now — this may take a moment! 📄"
+        return f"Great, I'll collect {what} from that page now 📄"
     if name == "clear_results":
         return "Sure! I'll clear the results table so we can start fresh 🧹"
     return "Give me a moment while I work on that 🔍"
 
 
 ACK_PROMPT = """\
-You are Booth Radar, a warm, upbeat assistant that collects exhibitor brands and
-booth numbers from trade-show websites. The user just sent the last message below
-and you are about to start working on it (for example opening a page or
-extracting booths).
+You are Booth Radar, a warm, upbeat assistant that collects data from public
+websites (trade-show exhibitors, product catalogs, dealer lists and more). The
+user just sent the last message below and you are about to start working on it
+(for example opening a page or collecting the details they asked for).
 
 Write what you say to the user right before you start: one or two short sentences
 that respond to what they actually said and tell them specifically what you are
@@ -412,13 +637,16 @@ class _Acknowledgement:
 
 # ── Turn ───────────────────────────────────────────────────────────────────
 
-def _context_prompt(results: list[Row]) -> str:
-    if not results:
+def _context_prompt(table: ResultsTable) -> str:
+    if not table.rows:
         return "The results table is currently empty."
-    shown = results[:HISTORY_CONTEXT_ROWS]
-    rows = "\n".join(f"{r['brand']} | {r['booth']}" for r in shown)
-    more = f"\n… and {len(results) - len(shown)} more" if len(results) > len(shown) else ""
-    return f"The results table currently has {len(results)} rows (brand | booth):\n{rows}{more}"
+    shown = table.rows[:HISTORY_CONTEXT_ROWS]
+    rows = "\n".join(
+        " | ".join(r[c] for c in table.columns)[:HISTORY_ROW_CHARS] for r in shown
+    )
+    more = f"\n… and {len(table) - len(shown)} more" if len(table) > len(shown) else ""
+    header = " | ".join(table.columns)
+    return f"The results table currently has {len(table)} rows ({header}):\n{rows}{more}"
 
 
 def _output_prompt(output_dir: str | None) -> str:
@@ -435,7 +663,7 @@ def _output_prompt(output_dir: str | None) -> str:
 def _run_mcp_turn(
     turn_id: str,
     convo: list[dict[str, str]],
-    results: list[Row],
+    table: ResultsTable,
     emit: Emit,
     ack: _Acknowledgement,
     cancel: threading.Event | None,
@@ -476,7 +704,7 @@ def _run_mcp_turn(
         args = {k: v for k, v in args.items() if k != "turn"}
         speak_first(_preamble_for(name, args))
         try:
-            return _run_tool(name, args, results, safe_emit)
+            return _run_tool(name, args, table, safe_emit)
         except Exception as exc:
             safe_emit("status", {"text": f"⚠️ {name} failed: {exc}"})
             raise
@@ -499,7 +727,7 @@ def _run_mcp_turn(
     reply = text.strip()
     if preamble:
         reply = f"{preamble}\n\n{reply}".strip()
-    return reply, results
+    return reply, table.snapshot()
 
 
 def run_turn(
@@ -517,8 +745,8 @@ def run_turn(
     Raises TurnCancelled if *cancel* is set before or between steps.
     """
     turn_id = turn_id or uuid.uuid4().hex
-    results = [dict(r) for r in results]
-    system = f"{_system_prompt(turn_id)}{_output_prompt(output_dir)}\n\n{_context_prompt(results)}"
+    table = ResultsTable(results)
+    system = f"{_system_prompt(turn_id)}{_output_prompt(output_dir)}\n\n{_context_prompt(table)}"
     convo: list[dict[str, str]] = [
         {"role": "system", "content": system},
         *({"role": m["role"], "content": m["content"]} for m in history),
@@ -526,7 +754,7 @@ def run_turn(
     ack = _Acknowledgement(history)
 
     if AGENT_TOOL_MODE == "mcp":
-        return _run_mcp_turn(turn_id, convo, results, emit, ack, cancel)
+        return _run_mcp_turn(turn_id, convo, table, emit, ack, cancel)
 
     reply_parts: list[str] = []
     for step in range(AGENT_MAX_STEPS):
@@ -602,7 +830,7 @@ def run_turn(
         if call_ok:
             log.info("[agent] step %d tool=%s args=%s", step + 1, name, args)
             try:
-                observation = _run_tool(name, args, results, emit)
+                observation = _run_tool(name, args, table, emit)
             except TurnCancelled:
                 raise
             except Exception as exc:
@@ -622,4 +850,4 @@ def run_turn(
         emit("token", {"text": note})
         reply_parts.append(note)
 
-    return "\n\n".join(reply_parts), results
+    return "\n\n".join(reply_parts), table.snapshot()
