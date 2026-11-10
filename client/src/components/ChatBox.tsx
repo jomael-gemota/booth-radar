@@ -1361,10 +1361,12 @@ function CopyButton({ text }: { text: string }) {
 
 function RadarLogoIcon({ className }: { className?: string }) {
   return (
-    <span
-      className={`radar-orb${className ? ` ${className}` : ''}`}
-      role="img"
-      aria-label="Booth Radar"
+    <img
+      src="/logo.gif"
+      alt="Booth Radar"
+      className={`radar-logo${className ? ` ${className}` : ''}`}
+      aria-hidden="true"
+      draggable={false}
     />
   )
 }

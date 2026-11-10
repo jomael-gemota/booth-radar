@@ -11,10 +11,11 @@ export default function SignInPage({ authFailed }: SignInPageProps) {
 
         {/* Logo + branding */}
         <div className="signin-brand">
-          <span
-            className="signin-logo radar-orb"
-            role="img"
-            aria-label="Booth Radar logo"
+          <img
+            src="/logo.gif"
+            alt="Booth Radar logo"
+            className="signin-logo radar-logo"
+            draggable={false}
           />
           <h1 className="signin-title">Booth Radar</h1>
           <p className="signin-sub">
