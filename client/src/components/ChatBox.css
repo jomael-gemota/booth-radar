@@ -426,8 +426,8 @@
 /* ── Avatar ─────────────────────────────────────────────────────────────── */
 
 .msg-avatar {
-  width: 42px;
-  height: 42px;
+  width: 63px;
+  height: 63px;
   border-radius: 50%;
   background: var(--accent-dim);
   border: 1px solid rgba(124, 111, 224, 0.25);
