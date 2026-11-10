@@ -36,8 +36,7 @@
 .signin-logo {
   width: 56px;
   height: 56px;
-  border-radius: 14px;
-  object-fit: contain;
+  border-radius: 50%;
   user-select: none;
 }
 
