@@ -83,7 +83,7 @@ sudo .venv/bin/playwright install --with-deps chromium
 
 ### Hermes MCP Setup
 
-With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `read_feed`, `map_site`, `fetch_page`, `extract`, `extract_booths`, `clear_results`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
+With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `capture_api`, `read_feed`, `map_site`, `fetch_page`, `extract`, `extract_booths`, `clear_results`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
 
 1. In `worker/.env`, set `TOOL_BRIDGE_TOKEN` (`openssl rand -hex 32`) and, for fast page extraction, `EXTRACT_BASE_URL` / `EXTRACT_MODEL` (free option: [Ollama](https://ollama.com) on the VM, e.g. `ollama pull qwen2.5:7b-instruct`).
 2. Register the server in `~/.hermes/config.yaml` for the user Hermes runs as:
@@ -109,10 +109,13 @@ To roll back, set `AGENT_TOOL_MODE=inline` and restart the worker.
 The agent picks the fastest route for each site (see [the design log entry](design-log/2026-11-10-custom-fields-and-site-feeds.md)):
 
 1. **Data feeds** — `find_feeds` detects WordPress REST content types and Shopify `products.json`; `read_feed` pulls every record (e.g. a 115-product catalog in ~7 s) and the extraction model maps them to the requested columns in parallel batches (`EXTRACT_CONCURRENCY`, default **6**; up to `MAX_FEED_RECORDS`, default **2000**).
-2. **Sitemaps** — `map_site` lists page URLs from the site's sitemaps.
-3. **Pages** — `extract` reads each page and pulls the requested fields. Server-rendered pages are fetched over plain HTTP (`SCRAPE_HTTP_FIRST`, default on); JavaScript pages, or pages that yield no rows over HTTP, are rendered in Chromium. JSON-LD product data on the page is passed to the extractor.
+2. **Captured APIs** — on sites without a known feed, `capture_api` opens a listing or search page in Chromium and records the JSON requests that return lists of records. Each becomes an `api:N` feed: `read_feed` replays it over plain HTTP and follows its page or offset parameter. Captured request headers stay in worker memory for `PAGE_CACHE_TTL` only.
+3. **Sitemaps** — `map_site` lists page URLs from the site's sitemaps.
+4. **Pages** — `extract` reads each page and pulls the requested fields. Server-rendered pages are fetched over plain HTTP (`SCRAPE_HTTP_FIRST`, default on); JavaScript pages, or pages that yield no rows over HTTP, are rendered in Chromium. JSON-LD product data on the page is passed to the extractor. Pages longer than `MAX_PAGE_CHARS` are extracted in overlapping chunks.
 
-Rows from later calls merge into earlier ones when their key columns match (e.g. a feed gives names and URLs, then product pages fill in style numbers). Feed and sitemap requests honour `robots.txt`.
+Rows from later calls merge into earlier ones when their key columns match (e.g. a feed gives names and URLs, then product pages fill in style numbers). Feed, API and sitemap requests honour `robots.txt`.
+
+**Learned recipes** (`RECIPES_ENABLED`, default on): when `extract` gets 4 or more pages with the same URL shape, the first page goes to the extraction model, which also proposes CSS selectors; if they reproduce that page's rows, the other pages are read with the selectors and no model call. For feeds, the first batch's rows are matched to the record keys, and when every column maps to a key the remaining batches are filled in code. Recipes are saved in `worker/data/recipes.json` (`RECIPES_PATH`). A recipe that keeps failing is dropped and relearned; `refresh=true` ignores saved recipes. See [the design log entry](design-log/2026-11-11-api-capture-and-recipes.md).
 
 - Pages are rendered on a pool of `SCRAPE_CONCURRENCY` threads (default **4**), each keeping a warm Chromium instance with images, media, and fonts blocked.
 - Scraped pages, feeds, sitemaps and extracted rows are cached in worker memory for `PAGE_CACHE_TTL` seconds (default **3600 s**, up to `PAGE_CACHE_MAX` entries). Follow-up questions are answered without re-scraping.
@@ -132,6 +135,7 @@ Test the agent in a terminal without the server:
 ```bash
 .venv/bin/python test_local.py --chat
 .venv/bin/python test_local.py --feeds https://thorogoodusa.com           # list and read site data feeds
+.venv/bin/python test_local.py --capture https://example.com/search --scroll   # record and read a page's JSON APIs
 .venv/bin/python test_local.py https://example.com/item --fields "Name,Price,SKU"
 ```
 
