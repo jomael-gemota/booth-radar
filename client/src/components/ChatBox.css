@@ -941,7 +941,17 @@
 .results-table td {
   padding: 9px 14px;
   text-align: left;
+  vertical-align: top;
   border-bottom: 1px solid var(--border);
+}
+
+.results-table td {
+  max-width: 320px;
+  overflow-wrap: anywhere;
+}
+
+.results-table th {
+  white-space: nowrap;
 }
 
 .results-table th {
