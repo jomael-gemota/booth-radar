@@ -83,7 +83,7 @@ sudo .venv/bin/playwright install --with-deps chromium
 
 ### Hermes MCP Setup
 
-With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `capture_api`, `read_feed`, `map_site`, `fetch_page`, `extract`, `navigate`, `snapshot`, `click`, `fill`, `select`, `scroll_until_end`, `paginate`, `extract_booths`, `clear_results`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
+With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `capture_api`, `read_feed`, `map_site`, `fetch_page`, `extract`, `navigate`, `snapshot`, `click`, `fill`, `select`, `scroll_until_end`, `paginate`, `start_job`, `cancel_job`, `extract_booths`, `clear_results`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
 
 1. In `worker/.env`, set `TOOL_BRIDGE_TOKEN` (`openssl rand -hex 32`) and, for fast page extraction, `EXTRACT_BASE_URL` / `EXTRACT_MODEL` (free option: [Ollama](https://ollama.com) on the VM, e.g. `ollama pull qwen2.5:7b-instruct`).
 2. Register the server in `~/.hermes/config.yaml` for the user Hermes runs as:
@@ -99,8 +99,19 @@ With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `cap
        #   TOOL_BRIDGE_TOKEN: "<same token as worker/.env>"
    ```
 
-3. Limit the API server platform to Booth Radar's tools: run `hermes tools`, select the **api_server** platform and enable only `mcp-booth-radar` (optionally `skills` and `clarify`). Check with `hermes tools list`. To switch tools off on every platform instead, list them under `agent.disabled_toolsets` (e.g. `browser`, `terminal`, `code_execution`, `web`, `delegation`).
-4. Restart Hermes, set `AGENT_TOOL_MODE=mcp` in `worker/.env`, and restart the worker. Its log shows `tool mode: mcp` and `[bridge] listening on …`.
+3. Limit the API server platform to Booth Radar's tools: run `hermes tools`, select the **api_server** platform and enable only `mcp-booth-radar` and `skills` (optionally `clarify`). Check with `hermes tools list`. To switch tools off on every platform instead, list them under `agent.disabled_toolsets` (e.g. `browser`, `terminal`, `code_execution`, `web`, `delegation`).
+4. Let Hermes read Booth Radar's skills straight from the repo, so a `git pull` updates them. Add to `~/.hermes/config.yaml`:
+
+   ```yaml
+   skills:
+     external_dirs:
+       - /path/to/booth-radar/worker/hermes-skills
+   ```
+
+   `hermes skills list` should show `site-scraping`, `directory-crawl`, `interactive-pages` and `product-catalog` (category `booth-radar`). Check the files with `python test_local.py --skills`.
+5. Restart Hermes, set `AGENT_TOOL_MODE=mcp` in `worker/.env`, and restart the worker. Its log shows `tool mode: mcp` and `[bridge] listening on …`.
+
+**Skills:** the scraping strategy (which route to try first, field naming, directories, interactive pages, product catalogs) lives in `worker/hermes-skills/booth-radar/*/SKILL.md`. In mcp mode the system prompt keeps a short summary and Hermes loads the matching skill with `skill_view`; in inline mode the worker adds the skill files to the prompt. Hermes can edit skills it finds under `external_dirs`, so if `git status` on the VM shows changes under `worker/hermes-skills/`, review them and keep or revert (`git checkout -- worker/hermes-skills`). See [the design log entry](design-log/2026-11-12-hermes-skills.md).
 
 To roll back, set `AGENT_TOOL_MODE=inline` and restart the worker.
 
@@ -114,6 +125,8 @@ The agent picks the fastest route for each site (see [the design log entry](desi
 4. **Pages** — `extract` reads each page and pulls the requested fields. Server-rendered pages are fetched over plain HTTP (`SCRAPE_HTTP_FIRST`, default on); JavaScript pages, or pages that yield no rows over HTTP, are rendered in Chromium. JSON-LD product data on the page is passed to the extractor. Pages longer than `MAX_PAGE_CHARS` are extracted in overlapping chunks.
 
 5. **Interactive pages** — when data only appears after clicking, filtering, searching or scrolling, `navigate` opens the page in a browser session and lists its elements with refs (`e1`, `e2`…). `click`, `fill`, `select` and `scroll_until_end` act on those refs, `snapshot` re-reads the page, `extract` with `session` reads the current page, and `paginate` clicks a "Next" control page by page while filling the table. A turn can hold up to 3 sessions; they close when the turn ends.
+
+6. **Background jobs** — for more than `JOB_MIN_URLS` pages (default **100**), the agent calls `start_job` instead of `extract`: the pages (a URL list, the URLs in a results column, or the site's sitemap; up to `MAX_JOB_URLS`, default **5000**) are extracted outside the chat turn, `JOB_BATCH_URLS` (40) at a time with at most `JOB_PAGE_CONCURRENCY` (4) tabs, one job at a time (`JOB_CONCURRENCY`). Rows keep appearing in the table, a chip above the message box shows progress with **Pause/Resume** and **Cancel**, and a finish message is added when the job ends. Chat stays open meanwhile; while a job runs, the table can't be cleared or replaced. Jobs are stored in MongoDB (`jobs` collection) and continue after a worker or server restart. See [the design log entry](design-log/2026-11-12-background-crawl-jobs.md).
 
 Rows from later calls merge into earlier ones when their key columns match (e.g. a feed gives names and URLs, then product pages fill in style numbers).
 
@@ -141,6 +154,7 @@ Test the agent in a terminal without the server:
 .venv/bin/python test_local.py --feeds https://thorogoodusa.com           # list and read site data feeds
 .venv/bin/python test_local.py --capture https://example.com/search --scroll   # record and read a page's JSON APIs
 .venv/bin/python test_local.py https://example.com/item --fields "Name,Price,SKU"
+.venv/bin/python test_local.py --skills                                     # check the Hermes skill files
 ```
 
 ---
