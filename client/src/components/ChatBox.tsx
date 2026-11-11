@@ -322,6 +322,10 @@ export default function ChatBox({ user }: { user: AuthUser }) {
           ),
       )
     }
+    closeActivity()
+  }
+
+  function closeActivity() {
     const tid = thinkingMsgId.current
     thinkingMsgId.current = null
     if (tid) {
@@ -331,20 +335,30 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     }
   }
 
-  function handleThinking(text: string) {
+  /**
+   * Add reasoning text or status lines to the open activity bubble, opening one if
+   * needed. While streaming it previews only the latest line; expanded, it shows all.
+   */
+  function appendActivity(next: (prevText: string) => string) {
     const tid = thinkingMsgId.current
     if (!tid) {
-      // Close the reply bubble so text after this reasoning appears below it, not above
+      // Close the reply bubble so text after this activity appears below it, not above
       if (streamingMsgId.current) finishStreaming()
       const newId = genId()
       thinkingMsgId.current = newId
-      addMessage({ id: newId, role: 'thinking', text, streaming: true })
+      addMessage({ id: newId, role: 'thinking', text: next(''), streaming: true })
       return
     }
-    setMessages((prev) => prev.map((m) => (m.id === tid ? { ...m, text: m.text + text } : m)))
+    setMessages((prev) => prev.map((m) => (m.id === tid ? { ...m, text: next(m.text) } : m)))
+  }
+
+  function handleThinking(text: string) {
+    appendActivity((prevText) => prevText + text)
   }
 
   function handleToken(text: string) {
+    // The reply has started: the activity before it is finished
+    if (text.trim() && thinkingMsgId.current) closeActivity()
     const id = streamingMsgId.current
     if (!id) {
       const newId = genId()
@@ -370,8 +384,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   }
 
   function handleStatus(text: string) {
-    finishStreaming()
-    addMessage({ id: genId(), role: 'status', text })
+    appendActivity((prevText) => `${prevText && !prevText.endsWith('\n') ? `${prevText}\n` : prevText}${text}\n`)
   }
 
   function endTurn() {
