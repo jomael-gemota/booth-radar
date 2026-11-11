@@ -924,6 +924,52 @@
   letter-spacing: 0.01em;
 }
 
+.results-file {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.results-file-icon {
+  font-size: 1.6rem;
+  line-height: 1;
+}
+
+.results-file-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.results-file-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.results-file-columns {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.results-file-note {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.results-file .export-btn {
+  flex-shrink: 0;
+}
+
 .results-table-wrap {
   width: 100%;
   overflow-x: auto;

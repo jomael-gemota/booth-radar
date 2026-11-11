@@ -22,6 +22,9 @@ import ExportButton from './ExportButton'
 import JobChip from './JobChip'
 import './ChatBox.css'
 
+// Larger results aren't rendered in the chat; they download as a CSV file
+const MAX_INLINE_ROWS = 20
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 type Role = 'user' | 'assistant' | 'status' | 'system' | 'thinking'
@@ -147,6 +150,8 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   const bottomRef      = useRef<HTMLDivElement>(null)
   const streamingMsgId = useRef<string | null>(null)
   const thinkingMsgId  = useRef<string | null>(null)
+  // Whether the activity bubble's last line is a progress line the next one replaces
+  const lastLineProgress = useRef(false)
   const inputRef       = useRef<HTMLTextAreaElement>(null)
   const turnStartRef   = useRef<number | null>(null)
 
@@ -358,6 +363,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   }
 
   function handleThinking(text: string) {
+    lastLineProgress.current = false
     appendActivity((prevText) => prevText + text)
   }
 
@@ -388,8 +394,14 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     })
   }
 
-  function handleStatus(text: string) {
-    appendActivity((prevText) => `${prevText && !prevText.endsWith('\n') ? `${prevText}\n` : prevText}${text}\n`)
+  /** Add a status line; a progress line ("Mapped 12/123") replaces the progress line before it. */
+  function handleStatus(text: string, progress: boolean) {
+    const replace = progress && lastLineProgress.current && thinkingMsgId.current !== null
+    lastLineProgress.current = progress
+    appendActivity((prevText) => {
+      const base = replace ? prevText.slice(0, prevText.lastIndexOf('\n', prevText.length - 2) + 1) : prevText
+      return `${base && !base.endsWith('\n') ? `${base}\n` : base}${text}\n`
+    })
   }
 
   function endTurn() {
@@ -431,6 +443,11 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     onCancelled: () => {
       endTurn()
       addMessage({ id: genId(), role: 'status', text: '⏹ Stopped' })
+    },
+    onExpired: () => {
+      endTurn()
+      const id = conversationIdRef.current
+      if (id) void loadConversation(id)
     },
   })
 
@@ -863,11 +880,17 @@ export default function ChatBox({ user }: { user: AuthUser }) {
 
                   {results.length > 0 && conversationId && (
                     <div className="results-block">
-                      <p className="results-label">
-                        📊 {results.length} row{results.length !== 1 ? 's' : ''} collected
-                      </p>
-                      <ResultsTable results={results} />
-                      <ExportButton conversationId={conversationId} />
+                      {results.length <= MAX_INLINE_ROWS ? (
+                        <>
+                          <p className="results-label">
+                            📊 {results.length} row{results.length !== 1 ? 's' : ''} collected
+                          </p>
+                          <ResultsTable results={results} />
+                          <ExportButton conversationId={conversationId} />
+                        </>
+                      ) : (
+                        <ResultsFileCard results={results} conversationId={conversationId} busy={busy} />
+                      )}
                     </div>
                   )}
 
@@ -1285,6 +1308,31 @@ function TypingIndicator() {
 
 function columnLabel(key: string): string {
   return key.charAt(0).toUpperCase() + key.slice(1)
+}
+
+/** Results too long to read in the chat: their size, columns and the CSV download. */
+function ResultsFileCard({ results, conversationId, busy }: {
+  results: ResultRow[]
+  conversationId: string
+  busy: boolean
+}) {
+  const columns = Object.keys(results[0] ?? {})
+  const rows = results.length.toLocaleString()
+  return (
+    <div className="results-file">
+      <div className="results-file-icon" aria-hidden>📄</div>
+      <div className="results-file-body">
+        <p className="results-file-title">{rows} rows collected</p>
+        <p className="results-file-columns">{columns.map(columnLabel).join(' · ')}</p>
+        {busy ? (
+          <p className="results-file-note">The CSV file is ready to download when Booth Radar finishes.</p>
+        ) : (
+          <p className="results-file-note">Too many rows to show here, so the full table is a CSV file.</p>
+        )}
+      </div>
+      {!busy && <ExportButton conversationId={conversationId} label="⬇ Download CSV" />}
+    </div>
+  )
 }
 
 function ResultsTable({ results }: { results: ResultRow[] }) {

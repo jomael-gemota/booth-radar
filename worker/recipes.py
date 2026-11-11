@@ -276,6 +276,35 @@ def learn_feed(records: list[dict[str, Any]], rows: list[Row], fields: list[str]
     return {"kind": "feed", "keys": mapping}
 
 
+def _key_name(name: str) -> str:
+    return re.sub(r"[^0-9a-z]", "", name.casefold())
+
+
+def direct_feed(records: list[dict[str, Any]], fields: list[str]) -> dict[str, Any] | None:
+    """
+    A feed recipe without the model when every field names a record key ("Exhibitor
+    Name" = exhibitorName, or the last part of a dotted key); None otherwise.
+    """
+    keys = list(dict.fromkeys(k for record in records for k in record))
+    mapping: dict[str, str | None] = {}
+    for name in fields:
+        wanted = _key_name(name)
+        exact = [k for k in keys if _key_name(k) == wanted]
+        tail = [k for k in keys if _key_name(k.rsplit(".", 1)[-1]) == wanted]
+        match = exact[:1] or (tail if len(tail) == 1 else [])
+        if not wanted or not match:
+            return None
+        mapping[name] = match[0]
+    return {"kind": "feed", "keys": mapping}
+
+
+def check_feed(recipe: dict[str, Any], records: list[dict[str, Any]], rows: list[Row], fields: list[str]) -> bool:
+    """Whether *recipe* reproduces the model's *rows* for *records*, one row per record."""
+    if len(rows) != len(records):
+        return False
+    return _match_ratio(rows, apply_feed(recipe, records, fields), fields) >= MATCH_RATIO
+
+
 def apply_feed(recipe: dict[str, Any], records: list[dict[str, Any]], fields: list[str]) -> list[Row]:
     mapping = recipe.get("keys") or {}
     rows = [{name: _as_text(record.get(mapping[name])) if mapping.get(name) else "" for name in fields} for record in records]

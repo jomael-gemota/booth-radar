@@ -19,7 +19,8 @@ import json
 import logging
 import os
 import threading
-from typing import Any
+import time
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 
@@ -44,6 +45,8 @@ log = logging.getLogger("worker")
 # ── Config ─────────────────────────────────────────────────────────────────
 SERVER_WS_URL = os.getenv("SERVER_WS_URL", "ws://localhost:3001/ws")
 RECONNECT_DELAY = 5  # seconds between reconnect attempts
+# Min seconds between live results-table updates sent during a turn
+RESULTS_EMIT_S = float(os.getenv("RESULTS_EMIT_S", "2"))
 
 # Strong references so in-flight turn tasks are not garbage-collected
 _running: set[asyncio.Task[None]] = set()
@@ -53,6 +56,50 @@ _cancel_events: dict[str, threading.Event] = {}
 
 
 # ── Turn handler ───────────────────────────────────────────────────────────
+
+class _LatestResults:
+    """
+    Sends the turn's results table at most every RESULTS_EMIT_S: each update is a
+    full snapshot, so only the latest one pending needs sending.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, send: Callable[[str, dict[str, Any]], None]) -> None:
+        self._loop = loop
+        self._send = send
+        self._lock = threading.Lock()
+        self._pending: dict[str, Any] | None = None
+        self._last = 0.0
+        self._scheduled = False
+
+    def put(self, payload: dict[str, Any]) -> None:
+        with self._lock:
+            self._pending = payload
+            wait = self._last + RESULTS_EMIT_S - time.monotonic()
+            if wait <= 0:
+                self._flush_locked()
+            elif not self._scheduled:
+                self._scheduled = True
+                self._loop.call_soon_threadsafe(self._loop.call_later, wait, self._flush)
+
+    def drop(self) -> None:
+        with self._lock:
+            self._pending = None
+
+    def flush(self) -> None:
+        with self._lock:
+            self._flush_locked()
+
+    def _flush(self) -> None:
+        with self._lock:
+            self._scheduled = False
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        if self._pending is not None:
+            self._send("results", self._pending)
+            self._pending = None
+            self._last = time.monotonic()
+
 
 async def handle_chat(
     outbox: asyncio.Queue[dict[str, Any]],
@@ -71,11 +118,19 @@ async def handle_chat(
         )
 
     scrubber = artifacts.PathScrubber(lambda t: send("token", {"text": t}))
+    results_out = _LatestResults(loop, send)
 
     def emit(type_: str, payload: dict[str, Any]) -> None:
         if type_ == "token":
             scrubber.feed(payload["text"])
             return
+        if type_ == "results":
+            results_out.put(payload)
+            return
+        if type_ == "done":
+            results_out.drop()  # done carries the final table
+        elif type_ == "error":
+            results_out.flush()
         scrubber.flush()
         send(type_, payload)
 

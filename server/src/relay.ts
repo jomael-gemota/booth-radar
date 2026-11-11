@@ -72,13 +72,23 @@ interface WorkerJobMessage {
   payload: unknown;
 }
 
+interface TurnEvent {
+  /** SSE event id, so a reconnecting browser only gets the events it missed. */
+  id: number;
+  type: WorkerEventType;
+  frame: string;
+}
+
 interface Turn {
   conversationId: ObjectId;
-  events: string[];
+  events: TurnEvent[];
+  lastEventId: number;
   clients: Set<Response>;
   finished: boolean;
   /** Accumulates thinking chunks and status lines in-memory so they can be persisted on done. */
   thinkingBuffer: string;
+  /** Whether the buffer's last line is a progress line, which the next one replaces. */
+  lastLineProgress: boolean;
   attachments: Attachment[];
   /** File inserts still in flight; `done` waits for them before saving the reply. */
   pendingFiles: Promise<unknown>[];
@@ -152,9 +162,11 @@ export function startTurn(
   turns.set(turnId, {
     conversationId,
     events: [],
+    lastEventId: 0,
     clients: new Set(),
     finished: false,
     thinkingBuffer: '',
+    lastLineProgress: false,
     attachments: [],
     pendingFiles: [],
     startedAt: Date.now(),
@@ -171,8 +183,11 @@ export function startTurn(
 }
 
 function broadcast(turnId: string, turn: Turn, type: WorkerEventType, payload: unknown): void {
-  const frame = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
-  turn.events.push(frame);
+  const id = ++turn.lastEventId;
+  const frame = `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
+  // Each results frame is a full snapshot: late subscribers only need the latest.
+  if (type === 'results') turn.events = turn.events.filter((e) => e.type !== 'results');
+  turn.events.push({ id, type, frame });
   for (const res of turn.clients) res.write(frame);
 
   if (type === 'done' || type === 'error' || type === 'cancelled') {
@@ -184,12 +199,12 @@ function broadcast(turnId: string, turn: Turn, type: WorkerEventType, payload: u
   }
 }
 
-/** Attach an SSE response to a turn, replaying events emitted so far. */
-export function subscribe(turnId: string, res: Response): boolean {
+/** Attach an SSE response to a turn, replaying the events emitted after event id *after*. */
+export function subscribe(turnId: string, res: Response, after = 0): boolean {
   const turn = turns.get(turnId);
   if (!turn) return false;
 
-  for (const frame of turn.events) res.write(frame);
+  for (const event of turn.events) if (event.id > after) res.write(event.frame);
   if (turn.finished) {
     res.end();
     return true;
@@ -208,11 +223,16 @@ async function persist(turn: Turn, type: WorkerEventType, payload: unknown): Pro
   if (type === 'thinking') {
     // Accumulate in-memory only — no DB write per chunk
     turn.thinkingBuffer += (payload as { text: string }).text;
+    turn.lastLineProgress = false;
   } else if (type === 'status') {
-    // Status lines are shown inside the reasoning block, one per line
-    const buffer = turn.thinkingBuffer;
+    // Status lines are shown inside the reasoning block, one per line; a progress
+    // line replaces the progress line before it.
+    const { text, progress } = payload as { text: string; progress?: boolean };
+    let buffer = turn.thinkingBuffer;
+    if (progress && turn.lastLineProgress) buffer = buffer.slice(0, buffer.lastIndexOf('\n', buffer.length - 2) + 1);
     const separator = buffer && !buffer.endsWith('\n') ? '\n' : '';
-    turn.thinkingBuffer = `${buffer}${separator}${(payload as { text: string }).text}\n`;
+    turn.thinkingBuffer = `${buffer}${separator}${text}\n`;
+    turn.lastLineProgress = Boolean(progress);
   } else if (type === 'results') {
     const { results } = payload as { results: ResultRow[] };
     await writeConversation(turn.conversationId, () =>

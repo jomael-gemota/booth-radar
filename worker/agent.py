@@ -144,7 +144,9 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
         'read_feed(url, feed, fields, instructions="", key_fields=[], replace=false, letters="", id_column="")',
         "Reads every record of one feed (from find_feeds or capture_api) and fills the\n"
         "results table with the requested fields. Fastest way to collect a whole\n"
-        "catalog or list. A letter-filtered feed is read for every letter A–Z and #\n"
+        "catalog or list. Use field names like the feed's own (\"Exhibitor Name\" for\n"
+        "exhibitorName) and give `instructions` only to filter records or explain a value:\n"
+        "they make big feeds slower. A letter-filtered feed is read for every letter A–Z and #\n"
         "(or only `letters`, e.g. \"A-C\"). A detail lookup feed needs `id_column`: the\n"
         "results column holding the item IDs (from a list feed); every row sharing an\n"
         "ID gets that item's details. Feeds often lack details only shown on each\n"
@@ -368,7 +370,8 @@ Guidelines
 - When finished, summarise what was collected: which site, how many rows,
   which columns, and any pages that failed.
 - Only mention the results table or its Export CSV button if you added rows
-  in this turn.
+  in this turn. Over 20 rows the chat shows no table, only a Download CSV
+  button: point to that instead, and never paste long lists into your reply.
 - Never mention file paths, folders, the server, your tools, or which actions
   were or weren't available. Speak only about the results and the user's request.
 - Keep replies concise — conversational does not mean verbose.
@@ -607,7 +610,7 @@ def _collect(
             i = futures[future]
             try:
                 outcomes[i] = future.result()
-                emit("status", {"text": f"📄 {verb} {done}/{len(labels)}: {labels[i]}"})
+                emit("status", {"text": f"📄 {verb} {done}/{len(labels)}: {labels[i]}", "progress": True})
             except Exception as exc:
                 log.warning("[agent] %s failed for %s: %s", verb.lower(), labels[i], exc)
                 outcomes[i] = exc
@@ -930,7 +933,7 @@ def _tool_read_feed(args: dict[str, Any], table: ResultsTable, emit: Emit) -> st
             return error
         emit("status", {"text": f"🔎 Looking up details for {len(ids):,} IDs on {site}"})
         pairs, notes = site_feeds.read_lookup(
-            url, feed_id, ids, lambda done, total: emit("status", {"text": f"🔎 Looked up {done:,}/{total:,} IDs"}),
+            url, feed_id, ids, lambda done, total: emit("status", {"text": f"🔎 Looked up {done:,}/{total:,} IDs", "progress": True}),
         )
         records = [{column: i, **record} for i, record in pairs]
         if not records:
@@ -963,37 +966,82 @@ def _tool_read_feed(args: dict[str, Any], table: ResultsTable, emit: Emit) -> st
     def work(i: int) -> list[Row]:
         return _cached_extract(f"feed:{site}|{feed_id}", batches[i][1], f"{site} {labels[i]}", fields, instructions, refresh)
 
-    # Instructions can filter records, which a field-to-key mapping can't.
-    use_recipe = recipes.RECIPES_ENABLED and not user_instructions and len(batches) > 1
-    recipe_key = recipes.feed_key(site, feed_id, fields)
-    recipe = recipes.get(recipe_key) if use_recipe and not refresh else None
-    learned_from_first = False
-    if use_recipe and recipe is None:
-        try:
-            first_rows = work(0)
-        except Exception as exc:
-            log.info("[agent] first %s batch failed, no feed recipe: %s", feed_id, exc)
-        else:
-            first_records = [_trim(r) for r in records[:batches[1][0]]]
-            recipe = recipes.learn_feed(first_records, first_rows, fields)
-            if recipe:
-                recipes.put(recipe_key, recipe)
-                learned_from_first = True
-
+    recipe, model_batches = _feed_recipe(
+        site, feed_id, fields, records, batches, work, bool(user_instructions), refresh,
+    )
     if recipe is None:
         lines = _collect(labels, work, EXTRACT_CONCURRENCY, table, emit, "Mapped", merge=merge)
-    else:
-        # The first batch is already cached when the recipe was just learned from it.
-        lines = _collect(labels[:1], work, 1, table, emit, "Mapped", merge=merge) if learned_from_first else []
-        remaining = records[batches[1][0]:] if learned_from_first else records
-        rows = recipes.apply_feed(recipe, remaining, fields)
-        added, updated = merge(rows)
-        _emit_results(table, emit)
-        recipes.record_uses({recipe_key: 1})
-        emit("status", {"text": f"⚡ Mapped {len(remaining):,} records instantly with the learned field mapping"})
-        merged = f", {updated} existing rows filled in" if updated else ""
-        lines.append(f"- {len(remaining):,} records mapped by field (no AI call): {len(rows):,} rows, {added} new{merged}")
+        return "\n".join([heading, *lines, _table_summary(table)])
+
+    # Batches the model already read (cached) keep its rows; the rest use the mapping.
+    lines: list[str] = []
+    mapped = added = updated = 0
+    for i in range(len(batches)):
+        start, end = batches[i][0], batches[i + 1][0] if i + 1 < len(batches) else len(records)
+        rows = work(i) if i in model_batches else recipes.apply_feed(recipe, records[start:end], fields)
+        if i not in model_batches:
+            mapped += end - start
+        batch_added, batch_updated = merge(rows)
+        added, updated = added + batch_added, updated + batch_updated
+    _emit_results(table, emit)
+    emit("status", {"text": f"⚡ Mapped {mapped:,} records instantly with the field mapping"})
+    merged = f", {updated:,} existing rows filled in" if updated else ""
+    by_model = f"{len(model_batches)} batch{'es' if len(model_batches) != 1 else ''} by the model, " if model_batches else ""
+    lines.append(f"- {by_model}{mapped:,} records mapped by field (no AI call): {added:,} new rows{merged}")
     return "\n".join([heading, *lines, _table_summary(table)])
+
+
+def _feed_recipe(
+    site: str,
+    feed_id: str,
+    fields: list[str],
+    records: list[dict[str, Any]],
+    batches: list[tuple[int, str]],
+    work: Callable[[int], list[Row]],
+    has_instructions: bool,
+    refresh: bool,
+) -> tuple[dict[str, Any] | None, set[int]]:
+    """
+    A field-to-key mapping for the feed's records, and the batches the model read to
+    find or check it. Without instructions: a saved mapping, the field names matching
+    record keys, or one learned from the first batch. With instructions (which may
+    filter records), a mapping learned from the first batch is used only if the model
+    also keeps every record of a middle batch and the mapping reproduces it.
+    """
+    if not recipes.RECIPES_ENABLED or len(batches) < 2:
+        return None, set()
+
+    def bounds(i: int) -> list[dict[str, Any]]:
+        end = batches[i + 1][0] if i + 1 < len(batches) else len(records)
+        return [_trim(r) for r in records[batches[i][0]:end]]
+
+    def model(i: int) -> list[Row] | None:
+        try:
+            return work(i)
+        except Exception as exc:
+            log.info("[agent] %s batch %d failed, no feed mapping: %s", feed_id, i + 1, exc)
+            return None
+
+    key = recipes.feed_key(site, feed_id, fields)
+    if not has_instructions:
+        recipe = None if refresh else recipes.get(key)
+        recipe = recipe or recipes.direct_feed(bounds(0), fields)
+        if recipe:
+            recipes.record_uses({key: 1})
+            return recipe, set()
+    first = model(0)
+    recipe = recipes.learn_feed(bounds(0), first, fields) if first is not None else None
+    if recipe is None:
+        return None, {0} if first is not None else set()
+    if not has_instructions:
+        recipes.put(key, recipe)
+        return recipe, {0}
+    middle = len(batches) // 2
+    rows = model(middle)
+    if rows is None or not recipes.check_feed(recipe, bounds(middle), rows, fields):
+        log.info("[agent] %s: the instructions filter records, mapping every batch with the model", feed_id)
+        return None, {0, middle}
+    return recipe, {0, middle}
 
 
 def _tool_capture_api(args: dict[str, Any], emit: Emit) -> str:
@@ -1152,7 +1200,7 @@ def _tool_paginate(args: dict[str, Any], table: ResultsTable, emit: Emit, sessio
         _emit_results(table, emit)
         merged = f", {updated} existing rows filled in" if updated else ""
         lines.append(f"- {label}: {len(rows)} rows found, {added} new{merged}")
-        emit("status", {"text": f"📄 Page {page_no + 1}: {len(rows)} rows"})
+        emit("status", {"text": f"📄 Page {page_no + 1}: {len(rows)} rows", "progress": True})
         if page_no + 1 >= max_pages:
             break
         snap = sessions.click_matching(sid, element["role"], element["label"])

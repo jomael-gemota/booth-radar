@@ -3,9 +3,10 @@ import './ExportButton.css'
 
 interface Props {
   conversationId: string
+  label?: string
 }
 
-export default function ExportButton({ conversationId }: Props) {
+export default function ExportButton({ conversationId, label = '⬇ Export CSV' }: Props) {
   const [loading, setLoading] = useState(false)
 
   async function handleExport() {
@@ -29,7 +30,7 @@ export default function ExportButton({ conversationId }: Props) {
 
   return (
     <button className="export-btn" onClick={handleExport} disabled={loading}>
-      {loading ? 'Exporting…' : '⬇ Export CSV'}
+      {loading ? 'Exporting…' : label}
     </button>
   )
 }

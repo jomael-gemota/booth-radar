@@ -83,7 +83,9 @@ async def read_feed(
     """
     Read every record of one feed (id from find_feeds or capture_api) and fill the
     user's results table with the requested fields. Fastest way to collect a whole
-    catalog or list. A letter-filtered feed is read for every letter A–Z and #
+    catalog or list. Use field names like the feed's own ("Exhibitor Name" for
+    exhibitorName); give `instructions` only to filter records or explain a value, as
+    they make big feeds slower. A letter-filtered feed is read for every letter A–Z and #
     (or only `letters`, e.g. "A-C"). A detail lookup feed needs `id_column`: the
     results column holding the item IDs; every row sharing an ID gets its details.
     """

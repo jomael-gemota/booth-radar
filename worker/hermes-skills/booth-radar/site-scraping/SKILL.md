@@ -49,7 +49,8 @@ order and stop at the first that gives the items the user wants.
   into one table. Use `key_fields` to say which columns identify a row (e.g. `["URL"]`
   or `["Style Number"]`).
 - Use `instructions` to say which items count or how to read a value ("only adult
-  sizes", "price without currency symbol").
+  sizes", "price without currency symbol"). Leave them out of `read_feed` otherwise:
+  without them, big feeds map in seconds instead of minutes.
 - Never call `clear_results` or pass `replace=true` unless the user asks for a new
   table. Rows you already collected are the user's results: to add or fix columns,
   read or extract again with the same column names and the rows merge.

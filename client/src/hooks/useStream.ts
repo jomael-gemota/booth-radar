@@ -11,7 +11,7 @@ export interface Attachment {
 
 interface ThinkingPayload  { text: string }
 interface TokenPayload     { text: string }
-interface StatusPayload    { text: string }
+interface StatusPayload    { text: string; progress?: boolean }
 interface ResultsPayload   { results: ResultRow[] }
 interface DonePayload      { reply: string; results: ResultRow[] }
 interface ErrorPayload     { message: string }
@@ -19,16 +19,22 @@ interface ErrorPayload     { message: string }
 type Handler = {
   onThinking?:  (text: string) => void
   onToken:      (text: string) => void
-  onStatus:     (text: string) => void
+  onStatus:     (text: string, progress: boolean) => void
   onResults:    (results: ResultRow[]) => void
   onFile:       (file: Attachment) => void
   onDone:       (results: ResultRow[]) => void
   onError:      (message: string) => void
   onCancelled?: () => void
+  /** The turn ended while the stream was disconnected; reload the conversation. */
+  onExpired?:   () => void
 }
+
+// Waits before each reconnect attempt after the stream drops
+const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000]
 
 /**
  * Opens an SSE stream for one assistant turn and calls handler callbacks.
+ * A dropped stream reconnects and receives only the events it missed.
  * The stream closes on `done`, `error`, or when turnId changes.
  */
 export function useStream(turnId: string | null, handlers: Handler) {
@@ -38,47 +44,72 @@ export function useStream(turnId: string | null, handlers: Handler) {
   useEffect(() => {
     if (!turnId) return
 
-    const es = new EventSource(`/api/stream/${turnId}`)
+    let es: EventSource | null = null
+    let lastEventId = 0
+    let failures = 0
+    let retry: ReturnType<typeof setTimeout> | undefined
+    let closed = false
 
-    es.addEventListener('thinking', (e) => {
-      handlersRef.current.onThinking?.((JSON.parse(e.data) as ThinkingPayload).text)
-    })
+    function close() {
+      closed = true
+      clearTimeout(retry)
+      es?.close()
+    }
 
-    es.addEventListener('token', (e) => {
-      handlersRef.current.onToken((JSON.parse(e.data) as TokenPayload).text)
-    })
+    function connect() {
+      const source = new EventSource(`/api/stream/${turnId}${lastEventId ? `?after=${lastEventId}` : ''}`)
+      es = source
 
-    es.addEventListener('status', (e) => {
-      handlersRef.current.onStatus((JSON.parse(e.data) as StatusPayload).text)
-    })
-
-    es.addEventListener('results', (e) => {
-      handlersRef.current.onResults((JSON.parse(e.data) as ResultsPayload).results)
-    })
-
-    es.addEventListener('file', (e) => {
-      handlersRef.current.onFile(JSON.parse(e.data) as Attachment)
-    })
-
-    es.addEventListener('done', (e) => {
-      es.close()
-      handlersRef.current.onDone((JSON.parse(e.data) as DonePayload).results)
-    })
-
-    es.addEventListener('error', (e) => {
-      es.close()
-      if (e instanceof MessageEvent) {
-        handlersRef.current.onError((JSON.parse(e.data) as ErrorPayload).message)
-      } else {
-        handlersRef.current.onError('Connection lost')
+      function on(type: string, handle: (data: string) => void) {
+        source.addEventListener(type, (e) => {
+          const event = e as MessageEvent<string>
+          if (event.lastEventId) lastEventId = Number(event.lastEventId)
+          failures = 0
+          handle(event.data)
+        })
       }
-    })
 
-    es.addEventListener('cancelled', () => {
-      es.close()
-      handlersRef.current.onCancelled?.()
-    })
+      on('thinking', (data) => handlersRef.current.onThinking?.((JSON.parse(data) as ThinkingPayload).text))
+      on('token', (data) => handlersRef.current.onToken((JSON.parse(data) as TokenPayload).text))
+      on('status', (data) => {
+        const { text, progress } = JSON.parse(data) as StatusPayload
+        handlersRef.current.onStatus(text, Boolean(progress))
+      })
+      on('results', (data) => handlersRef.current.onResults((JSON.parse(data) as ResultsPayload).results))
+      on('file', (data) => handlersRef.current.onFile(JSON.parse(data) as Attachment))
+      on('done', (data) => {
+        close()
+        handlersRef.current.onDone((JSON.parse(data) as DonePayload).results)
+      })
+      on('cancelled', () => {
+        close()
+        handlersRef.current.onCancelled?.()
+      })
+      on('expired', (data) => {
+        close()
+        if (handlersRef.current.onExpired) handlersRef.current.onExpired()
+        else handlersRef.current.onError((JSON.parse(data) as ErrorPayload).message)
+      })
 
-    return () => es.close()
+      source.addEventListener('error', (e) => {
+        source.close()
+        if (closed) return
+        if (e instanceof MessageEvent) {
+          close()
+          handlersRef.current.onError((JSON.parse(e.data) as ErrorPayload).message)
+          return
+        }
+        // The connection dropped (proxy timeout, network blip): the turn keeps running.
+        if (failures >= RECONNECT_DELAYS_MS.length) {
+          close()
+          handlersRef.current.onError('Connection lost')
+          return
+        }
+        retry = setTimeout(connect, RECONNECT_DELAYS_MS[failures++])
+      })
+    }
+
+    connect()
+    return close
   }, [turnId])
 }
