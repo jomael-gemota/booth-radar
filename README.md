@@ -83,7 +83,7 @@ sudo .venv/bin/playwright install --with-deps chromium
 
 ### Hermes MCP Setup
 
-With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `capture_api`, `read_feed`, `map_site`, `fetch_page`, `extract`, `extract_booths`, `clear_results`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
+With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `capture_api`, `read_feed`, `map_site`, `fetch_page`, `extract`, `navigate`, `snapshot`, `click`, `fill`, `select`, `scroll_until_end`, `paginate`, `extract_booths`, `clear_results`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
 
 1. In `worker/.env`, set `TOOL_BRIDGE_TOKEN` (`openssl rand -hex 32`) and, for fast page extraction, `EXTRACT_BASE_URL` / `EXTRACT_MODEL` (free option: [Ollama](https://ollama.com) on the VM, e.g. `ollama pull qwen2.5:7b-instruct`).
 2. Register the server in `~/.hermes/config.yaml` for the user Hermes runs as:
@@ -113,11 +113,15 @@ The agent picks the fastest route for each site (see [the design log entry](desi
 3. **Sitemaps** — `map_site` lists page URLs from the site's sitemaps.
 4. **Pages** — `extract` reads each page and pulls the requested fields. Server-rendered pages are fetched over plain HTTP (`SCRAPE_HTTP_FIRST`, default on); JavaScript pages, or pages that yield no rows over HTTP, are rendered in Chromium. JSON-LD product data on the page is passed to the extractor. Pages longer than `MAX_PAGE_CHARS` are extracted in overlapping chunks.
 
-Rows from later calls merge into earlier ones when their key columns match (e.g. a feed gives names and URLs, then product pages fill in style numbers). Feed, API and sitemap requests honour `robots.txt`.
+5. **Interactive pages** — when data only appears after clicking, filtering, searching or scrolling, `navigate` opens the page in a browser session and lists its elements with refs (`e1`, `e2`…). `click`, `fill`, `select` and `scroll_until_end` act on those refs, `snapshot` re-reads the page, `extract` with `session` reads the current page, and `paginate` clicks a "Next" control page by page while filling the table. A turn can hold up to 3 sessions; they close when the turn ends.
+
+Rows from later calls merge into earlier ones when their key columns match (e.g. a feed gives names and URLs, then product pages fill in style numbers).
+
+**Polite and safe by default:** pages, feeds, APIs and sitemaps honour `robots.txt` (`RESPECT_ROBOTS`, default on), at most `DOMAIN_CONCURRENCY` requests (default **4**) go to one site at a time, and private, loopback and link-local addresses are refused, including on every redirect hop. See [the design log entry](design-log/2026-11-12-browser-sessions-and-navigation.md).
 
 **Learned recipes** (`RECIPES_ENABLED`, default on): when `extract` gets 4 or more pages with the same URL shape, the first page goes to the extraction model, which also proposes CSS selectors; if they reproduce that page's rows, the other pages are read with the selectors and no model call. For feeds, the first batch's rows are matched to the record keys, and when every column maps to a key the remaining batches are filled in code. Recipes are saved in `worker/data/recipes.json` (`RECIPES_PATH`). A recipe that keeps failing is dropped and relearned; `refresh=true` ignores saved recipes. See [the design log entry](design-log/2026-11-11-api-capture-and-recipes.md).
 
-- Pages are rendered on a pool of `SCRAPE_CONCURRENCY` threads (default **4**), each keeping a warm Chromium instance with images, media, and fonts blocked.
+- Pages are rendered in one warm Chromium with up to `SCRAPE_CONCURRENCY` tabs (default **6**). Pages from the same site share a browser context, and images, media, fonts and common trackers are blocked. A render waits for the page to go idle for at most `SCRAPE_IDLE_TIMEOUT_MS` (default **3000**), or only until a learned recipe's selector appears.
 - Scraped pages, feeds, sitemaps and extracted rows are cached in worker memory for `PAGE_CACHE_TTL` seconds (default **3600 s**, up to `PAGE_CACHE_MAX` entries). Follow-up questions are answered without re-scraping.
 - The cache clears on worker restart. Set `PAGE_CACHE_TTL=0` to disable it.
 
