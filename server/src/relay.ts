@@ -2,6 +2,7 @@ import type { Response } from 'express';
 import { WebSocket } from 'ws';
 import { Binary, ObjectId } from 'mongodb';
 import { getDb } from './db.js';
+import { dispatchJobs, handleJobFrame } from './jobs.js';
 
 // ── Shared types ───────────────────────────────────────────────────────────
 
@@ -63,6 +64,14 @@ interface WorkerMessage {
   payload: unknown;
 }
 
+const JOB_FRAMES = new Set(['job_created', 'job_progress', 'job_finished']);
+
+interface WorkerJobMessage {
+  jobId: string;
+  type: string;
+  payload: unknown;
+}
+
 interface Turn {
   conversationId: ObjectId;
   events: string[];
@@ -98,6 +107,32 @@ export function isWorkerConnected(): boolean {
   return workerSocket !== null && workerSocket.readyState === WebSocket.OPEN;
 }
 
+/** Send a control message to the worker; false when it isn't connected. */
+export function sendToWorker(message: Record<string, unknown>): boolean {
+  if (!workerSocket || !isWorkerConnected()) return false;
+  workerSocket.send(JSON.stringify(message));
+  return true;
+}
+
+// A turn and a background job both save full results snapshots of the same
+// conversation, so its writes run one at a time in arrival order.
+const conversationWrites = new Map<string, Promise<unknown>>();
+
+export function writeConversation(conversationId: ObjectId, write: () => Promise<unknown>): Promise<unknown> {
+  const key = conversationId.toHexString();
+  const next = (conversationWrites.get(key) ?? Promise.resolve()).catch(() => undefined).then(write);
+  conversationWrites.set(key, next);
+  next
+    .catch(() => undefined)
+    .finally(() => {
+      if (conversationWrites.get(key) === next) conversationWrites.delete(key);
+    });
+  return next;
+}
+
+// Job frames are handled one at a time so a job's record exists before its progress.
+let jobFrames: Promise<unknown> = Promise.resolve();
+
 export function activeTurnFor(conversationId: string): string | undefined {
   return activeTurns.get(conversationId);
 }
@@ -109,6 +144,7 @@ export function startTurn(
   conversationId: ObjectId,
   messages: Pick<ChatMessage, 'role' | 'content'>[],
   results: ResultRow[],
+  job: unknown = null,
 ): void {
   if (!workerSocket || !isWorkerConnected()) {
     throw new Error('Worker is not connected');
@@ -130,6 +166,7 @@ export function startTurn(
     conversationId: conversationId.toHexString(),
     messages,
     results,
+    job,
   }));
 }
 
@@ -178,7 +215,9 @@ async function persist(turn: Turn, type: WorkerEventType, payload: unknown): Pro
     turn.thinkingBuffer = `${buffer}${separator}${(payload as { text: string }).text}\n`;
   } else if (type === 'results') {
     const { results } = payload as { results: ResultRow[] };
-    await col.updateOne({ _id: turn.conversationId }, { $set: { results, updatedAt: new Date() } });
+    await writeConversation(turn.conversationId, () =>
+      col.updateOne({ _id: turn.conversationId }, { $set: { results, updatedAt: new Date() } }),
+    );
   } else if (type === 'done') {
     const { reply, results } = payload as { reply: string; results: ResultRow[] };
     await Promise.allSettled(turn.pendingFiles);
@@ -196,12 +235,14 @@ async function persist(turn: Turn, type: WorkerEventType, payload: unknown): Pro
       duration,
       ...(turn.attachments.length ? { attachments: turn.attachments } : {}),
     });
-    await col.updateOne(
-      { _id: turn.conversationId },
-      {
-        $set:  { results, updatedAt: now },
-        $push: { messages: { $each: newMessages } } as never,
-      },
+    await writeConversation(turn.conversationId, () =>
+      col.updateOne(
+        { _id: turn.conversationId },
+        {
+          $set:  { results, updatedAt: now },
+          $push: { messages: { $each: newMessages } } as never,
+        },
+      ),
     );
   }
 }
@@ -266,6 +307,7 @@ export function cancelTurn(turnId: string): boolean {
 export function attachWorker(ws: WebSocket): void {
   console.log('[ws] worker connected');
   workerSocket = ws;
+  dispatchJobs().catch((err) => console.error('[jobs] failed to dispatch unfinished jobs', err));
 
   ws.on('message', (raw) => {
     let msg: WorkerMessage;
@@ -273,6 +315,14 @@ export function attachWorker(ws: WebSocket): void {
       msg = JSON.parse(raw.toString()) as WorkerMessage;
     } catch (err) {
       console.error('[ws] failed to parse worker message', err);
+      return;
+    }
+
+    if (JOB_FRAMES.has(msg.type)) {
+      const { type, jobId, payload } = msg as unknown as WorkerJobMessage;
+      jobFrames = jobFrames
+        .then(() => handleJobFrame(type, jobId, payload))
+        .catch((err) => console.error(`[jobs] failed to handle ${type}`, err));
       return;
     }
 
