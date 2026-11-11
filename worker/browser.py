@@ -267,6 +267,10 @@ def render(url: str, wait_for: str | None = None) -> str:
     return run(_retry(lambda: _render(url, wait_for)))
 
 
+def _is_json(response: Any) -> bool:
+    return response.status == 200 and "json" in (response.headers.get("content-type") or "")
+
+
 async def _capture(url: str, scroll: bool) -> list[dict[str, Any]]:
     responses: list[Any] = []
 
@@ -280,6 +284,10 @@ async def _capture(url: str, scroll: bool) -> list[dict[str, Any]]:
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             await _settle(page, None, CAPTURE_IDLE_MS)
+            if not any(_is_json(r) for r in responses):
+                # Single-page apps can start their data calls after the network first goes quiet.
+                await asyncio.sleep(CAPTURE_IDLE_MS / 2000)
+                await _settle(page, None, CAPTURE_IDLE_MS)
             if scroll:
                 for _ in range(CAPTURE_SCROLL_ROUNDS):
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -289,7 +297,7 @@ async def _capture(url: str, scroll: bool) -> list[dict[str, Any]]:
             for response in responses:
                 if len(captured) >= MAX_CAPTURED_RESPONSES:
                     break
-                if response.status != 200 or "json" not in (response.headers.get("content-type") or ""):
+                if not _is_json(response):
                     continue
                 try:
                     body = await response.body()
@@ -306,7 +314,10 @@ async def _capture(url: str, scroll: bool) -> list[dict[str, Any]]:
                     "body": response.request.post_data,
                     "data": data,
                 })
-            log.info("[browser] captured %d JSON responses on %s", len(captured), url)
+            log.info(
+                "[browser] captured %d JSON responses on %s (%d data requests, title %r)",
+                len(captured), url, len(responses), await page.title(),
+            )
             return captured
         finally:
             await _close(page)
@@ -361,6 +372,28 @@ async def _after_action(session: _Session, pages_before: set[Any]) -> dict[str, 
 
 def _locator(session: _Session, ref: str) -> Any:
     return session.page.locator(f'[data-br-ref="{ref}"]').first
+
+
+async def _click(session: _Session, locator: Any) -> str:
+    """
+    Click *locator*. When the click times out (element covered or still animating),
+    open a link's address directly, or force the click on other elements.
+    Returns the fallback used, or "".
+    """
+    from playwright.async_api import TimeoutError as PlaywrightTimeout  # type: ignore
+
+    try:
+        await locator.click(timeout=ACTION_TIMEOUT_MS)
+        return ""
+    except PlaywrightTimeout:
+        log.info("[browser] click timed out on %s, using a fallback", session.page.url)
+    href = await locator.evaluate("e => (e.closest('a[href]') || {}).href || ''")
+    if href.startswith(("http://", "https://")):
+        net_guard.check_url(href, net_guard.RESPECT_ROBOTS)
+        await session.page.goto(href, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        return f"the element could not be clicked, so its link address {href} was opened"
+    await locator.click(timeout=ACTION_TIMEOUT_MS, force=True)
+    return "the element was covered or still moving, so the click was forced"
 
 
 async def _require(session: _Session, ref: str) -> Any:
@@ -420,8 +453,11 @@ class TurnSessions:
             async def go() -> dict[str, Any]:
                 locator = await _require(session, ref)
                 before = set(session.context.pages)
-                await locator.click(timeout=ACTION_TIMEOUT_MS)
-                return await _after_action(session, before)
+                fallback = await _click(session, locator)
+                snap = await _after_action(session, before)
+                if fallback:
+                    snap["fallback"] = fallback
+                return snap
 
             return run(go())
 
@@ -437,7 +473,7 @@ class TurnSessions:
                     return None
                 before = set(session.context.pages)
                 try:
-                    await _locator(session, match["ref"]).click(timeout=ACTION_TIMEOUT_MS)
+                    await _click(session, _locator(session, match["ref"]))
                 except Exception as exc:
                     log.info("[browser] could not click %s %r: %s", role, label, exc)
                     return None
