@@ -37,7 +37,7 @@
   width: 108px;
   height: 108px;
   border-radius: 50%;
-  object-fit: cover;
+  object-fit: contain;
   user-select: none;
 }
 
