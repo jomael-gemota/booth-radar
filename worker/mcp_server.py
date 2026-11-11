@@ -77,15 +77,20 @@ async def read_feed(
     key_fields: list[str] | None = None,
     replace: bool = False,
     refresh: bool = False,
+    letters: str = "",
+    id_column: str = "",
 ) -> str:
     """
     Read every record of one feed (id from find_feeds or capture_api) and fill the
     user's results table with the requested fields. Fastest way to collect a whole
-    catalog or list.
+    catalog or list. A letter-filtered feed is read for every letter A–Z and #
+    (or only `letters`, e.g. "A-C"). A detail lookup feed needs `id_column`: the
+    results column holding the item IDs; every row sharing an ID gets its details.
     """
     return await _call(
         "read_feed", turn, url=url, feed=feed, fields=fields, instructions=instructions,
-        key_fields=key_fields or [], replace=replace, refresh=refresh,
+        key_fields=key_fields or [], replace=replace, refresh=refresh, letters=letters,
+        id_column=id_column,
     )
 
 
@@ -95,7 +100,8 @@ async def capture_api(url: str, turn: str = "", scroll: bool = False) -> str:
     Open a listing or search page in the browser and record the JSON data requests it
     makes. Each one that returns records becomes a feed (api:1, api:2, …) readable with
     read_feed. Use it when find_feeds found nothing; set `scroll` for infinite-scroll or
-    "load more" pages.
+    "load more" pages. On one item's page it finds detail lookup feeds, which fetch
+    fields the list lacks (booth, phone…) for every row at once.
     """
     return await _call("capture_api", turn, url=url, scroll=scroll)
 
@@ -133,16 +139,20 @@ async def extract(
     refresh: bool = False,
     replace: bool = False,
     session: str = "",
+    url_template: str = "",
 ) -> str:
     """
     Scrape each URL in parallel and extract one row per matching item with the
     requested fields (e.g. ["Product Name", "Price", "URL"]) into the user's results
     table. Rows matching existing ones on `key_fields` fill in their empty cells.
-    Pass `session` instead of `urls` to extract from a browser session's current page.
+    Pass `session` instead of `urls` to extract from a browser session's current page,
+    or `url_template` (e.g. "https://site/item/{Item ID}") to build item pages from a
+    results column; each page fills the rows sharing its value.
     """
     return await _call(
         "extract", turn, urls=urls or [], fields=fields, instructions=instructions,
         key_fields=key_fields or [], refresh=refresh, replace=replace, session=session,
+        url_template=url_template,
     )
 
 
@@ -157,17 +167,20 @@ async def start_job(
     instructions: str = "",
     key_fields: list[str] | None = None,
     replace: bool = False,
+    url_template: str = "",
 ) -> str:
     """
     Extract many pages in the background, outside this reply, filling the results
     table as it goes; returns at once. Give exactly one URL source: `urls`,
     `url_column` (a results column holding page URLs, to fill in details from each
-    page), or `sitemap` (a site URL) with `include`. Use it instead of extract for
-    large page counts.
+    page), `sitemap` (a site URL) with `include`, or `url_template` (e.g.
+    "https://site/item/{Item ID}", pages built from a results column; each fills the
+    rows sharing its value). Use it instead of extract for large page counts.
     """
     return await _call(
         "start_job", turn, fields=fields, urls=urls or [], url_column=url_column, sitemap=sitemap,
         include=include, instructions=instructions, key_fields=key_fields or [], replace=replace,
+        url_template=url_template,
     )
 
 
@@ -251,7 +264,7 @@ async def extract_booths(urls: list[str], turn: str = "", refresh: bool = False)
 
 @server.tool(structured_output=False)
 async def clear_results(turn: str = "") -> str:
-    """Empty the user's results table."""
+    """Empty the user's results table. Only when the user asks for a new table."""
     return await _call("clear_results", turn)
 
 

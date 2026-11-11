@@ -47,6 +47,9 @@ class Job:
     instructions: str
     urls: list[str]
     url_field: str = ""
+    # Pages built from a results column ("https://site/item/{ID}"): their rows fill
+    # the rows sharing that column's value
+    url_template: str = ""
     cursor: int = 0
     rows_added: int = 0
     failed_count: int = 0
@@ -62,6 +65,7 @@ class Job:
             "keyFields": self.key_fields,
             "instructions": self.instructions,
             "urlField": self.url_field,
+            "urlTemplate": self.url_template,
             "urls": self.urls,
         }
 
@@ -117,6 +121,7 @@ def create(
     instructions: str,
     urls: list[str],
     url_field: str = "",
+    url_template: str = "",
 ) -> Job:
     """Start a new job filling *table* (already prepared for *fields*)."""
     job = Job(
@@ -127,6 +132,7 @@ def create(
         instructions=instructions,
         urls=urls,
         url_field=url_field,
+        url_template=url_template,
         table=table,
     )
     _send({"type": "job_created", "jobId": job.job_id, "payload": job.spec()})
@@ -156,6 +162,7 @@ def run(spec: dict[str, Any], cursor: int, results: list[dict[str, str]]) -> Non
         instructions=str(spec.get("instructions") or ""),
         urls=[str(u) for u in spec.get("urls") or []],
         url_field=str(spec.get("urlField") or ""),
+        url_template=str(spec.get("urlTemplate") or ""),
         cursor=max(0, int(cursor or 0)),
         table=table,
     )

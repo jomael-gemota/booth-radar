@@ -19,6 +19,7 @@ import uuid
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
+from urllib.parse import quote, unquote
 
 import jobs
 import page_cache
@@ -62,6 +63,10 @@ _URL_FIELDS = {"url", "link", "page url", "product url", "source url"}
 Emit = Callable[[str, dict[str, Any]], None]
 Row = dict[str, str]
 CallTool = Callable[[str, dict[str, Any], Emit], str]
+# Writes rows into the results table: (rows added, rows updated)
+Merge = Callable[[list[Row]], tuple[int, int]]
+
+_PLACEHOLDER_RE = re.compile(r"\{([^{}]+)\}")
 
 
 class TurnCancelled(Exception):
@@ -135,13 +140,15 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
     (
         "read_feed",
         '{"url": "https://...", "feed": "wp:product", "fields": ["Product Name", "URL"], '
-        '"instructions": "", "key_fields": [], "replace": false}',
-        'read_feed(url, feed, fields, instructions="", key_fields=[], replace=false)',
+        '"instructions": "", "key_fields": [], "replace": false, "letters": "", "id_column": ""}',
+        'read_feed(url, feed, fields, instructions="", key_fields=[], replace=false, letters="", id_column="")',
         "Reads every record of one feed (from find_feeds or capture_api) and fills the\n"
         "results table with the requested fields. Fastest way to collect a whole\n"
-        "catalog or list. Feeds\n"
-        "often lack details only shown on each item's page (specs, prices): collect\n"
-        "the URLs here, then extract those pages for the missing fields.",
+        "catalog or list. A letter-filtered feed is read for every letter A–Z and #\n"
+        "(or only `letters`, e.g. \"A-C\"). A detail lookup feed needs `id_column`: the\n"
+        "results column holding the item IDs (from a list feed); every row sharing an\n"
+        "ID gets that item's details. Feeds often lack details only shown on each\n"
+        "item's page: look for a lookup feed first, else extract those pages.",
     ),
     (
         "capture_api",
@@ -151,7 +158,8 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
         "(search results, product grids, store lists). Each one that returns records\n"
         "becomes a feed (api:1, api:2, …) you can read with read_feed. Use it on a\n"
         "listing or search page when find_feeds found nothing. Set scroll=true for\n"
-        "infinite-scroll or \"load more\" pages.",
+        "infinite-scroll or \"load more\" pages. On one item's page it finds detail\n"
+        "lookup feeds, which fetch fields the list lacks (booth, phone…) for every row.",
     ),
     (
         "map_site",
@@ -173,13 +181,17 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
     (
         "extract",
         '{"urls": ["https://...", ...], "fields": ["Product Name", "Price"], '
-        '"instructions": "", "key_fields": [], "refresh": false, "replace": false, "session": ""}',
-        'extract(urls, fields, instructions="", key_fields=[], refresh=false, replace=false, session="")',
+        '"instructions": "", "key_fields": [], "refresh": false, "replace": false, "session": "", '
+        '"url_template": ""}',
+        'extract(urls, fields, instructions="", key_fields=[], refresh=false, replace=false, session="", '
+        'url_template="")',
         "Scrapes each URL in parallel and extracts one row per matching item with\n"
         "the requested fields into the results table. Use `instructions` to say which\n"
         f"items count or how to read a value. Max {MAX_URLS_PER_CALL} URLs per call;\n"
         "call it again for more. Pass `session` instead of urls to extract from a\n"
-        "browser session's current page (after clicking, filtering or scrolling).",
+        "browser session's current page (after clicking, filtering or scrolling), or\n"
+        "`url_template` (e.g. \"https://site/item/{Item ID}\") to build item pages from a\n"
+        "results column; each page fills the rows sharing its value.",
     ),
     (
         "navigate",
@@ -235,14 +247,17 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
     (
         "start_job",
         '{"fields": ["Product Name", "Price", "URL"], "urls": [], "url_column": "", '
-        '"sitemap": "", "include": "", "instructions": "", "key_fields": [], "replace": false}',
-        'start_job(fields, urls=[], url_column="", sitemap="", include="", instructions="", '
-        "key_fields=[], replace=false)",
+        '"sitemap": "", "include": "", "url_template": "", "instructions": "", "key_fields": [], '
+        '"replace": false}',
+        'start_job(fields, urls=[], url_column="", sitemap="", include="", url_template="", '
+        'instructions="", key_fields=[], replace=false)',
         "Extracts many pages in the background, outside this reply, filling the results\n"
         "table as it goes; returns at once. Give exactly one URL source: `urls`;\n"
         "`url_column` (a results column holding page URLs, e.g. \"URL\" from a feed, to\n"
-        "fill in details from each page); or `sitemap` (a site URL) with `include`\n"
-        f"(like map_site). Up to {jobs.MAX_JOB_URLS:,} pages. Use it instead of extract when more\n"
+        "fill in details from each page); `sitemap` (a site URL) with `include`\n"
+        "(like map_site); or `url_template` (e.g. \"https://site/item/{Item ID}\", pages\n"
+        "built from a results column; each fills the rows sharing its value).\n"
+        f"Up to {jobs.MAX_JOB_URLS:,} pages. Use it instead of extract when more\n"
         f"than {jobs.JOB_MIN_URLS} pages need extracting. One job per conversation.",
     ),
     (
@@ -263,7 +278,7 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
         "clear_results",
         "{}",
         "clear_results()",
-        "Empties the results table.",
+        "Empties the results table. Only when the user asks for a new table.",
     ),
 ]
 
@@ -316,12 +331,15 @@ _MCP_STRATEGY = f"""
 How to scrape fast
 ────────────────────────────────────────────────────────────
 1. New site: find_feeds first; read_feed when a feed has the items.
-2. No feed: capture_api on a listing or search page, then read_feed its api feed.
-3. Otherwise get the page URLs (feed rows, map_site, listing pages) and
+2. No feed: capture_api on a listing or search page, then read_feed its api feed
+   (a letter-filtered feed is read for every letter at once).
+3. Fields missing from the list (booth, phone…): capture_api on ONE item's page and
+   read_feed its "detail lookup" feed with id_column (the rows' ID column).
+4. Otherwise get the page URLs (feed rows, map_site, listing pages, url_template) and
    extract them; for more than {jobs.JOB_MIN_URLS} pages use start_job and end your reply.
-4. Data behind clicks, filters, search forms or scrolling: navigate and the
+5. Data behind clicks, filters, search forms or scrolling: navigate and the
    interaction tools.
-5. fetch_page only to understand a layout or answer a question.
+6. fetch_page only to understand a layout or answer a question.
 
 Before working on a website, load the matching skill with skill_view —
 always site-scraping, plus any other that fits:
@@ -345,6 +363,8 @@ Guidelines
 ────────────────────────────────────────────────────────────
 - If the user just chats or asks a question, answer directly without tools.
 - Never invent data. Only report what the tools returned.
+- Never call clear_results or pass replace=true unless the user asked for a new
+  table. Rows already collected stay; add missing columns or items to them.
 - When finished, summarise what was collected: which site, how many rows,
   which columns, and any pages that failed.
 - Only mention the results table or its Export CSV button if you added rows
@@ -552,11 +572,13 @@ def _collect(
     emit: Emit,
     verb: str,
     failed: list[tuple[str, str]] | None = None,
+    merge: Merge | None = None,
 ) -> list[str]:
     """
-    Run *work* for each label in parallel and merge rows into *table* in label order.
-    Labels that fail are also added to *failed* as (label, error).
+    Run *work* for each label in parallel and merge rows into *table* in label order
+    (with *merge*, default table.add). Labels that fail are also added to *failed* as (label, error).
     """
+    merge = merge or table.add
     lines: list[str] = []
     outcomes: dict[int, list[Row] | Exception] = {}
     next_to_merge = 0
@@ -573,7 +595,7 @@ def _collect(
                 if failed is not None:
                     failed.append((label, str(outcome)))
                 continue
-            added, updated = table.add(outcome)
+            added, updated = merge(outcome)
             changed = changed or bool(added or updated)
             merged = f", {updated} existing rows filled in" if updated else ""
             lines.append(f"- {label}: {len(outcome)} rows found, {added} new{merged}")
@@ -595,6 +617,46 @@ def _collect(
     return lines
 
 
+def _column(table: ResultsTable, name: str) -> str:
+    """The results column called *name* (any case), or ""."""
+    return next((c for c in table.columns if c.casefold() == name.casefold()), "")
+
+
+def _template_parts(template: str) -> tuple[str, str, str] | None:
+    """(before, column name, after) of a URL template with one {Column} placeholder."""
+    names = _PLACEHOLDER_RE.findall(template)
+    if len(names) != 1 or not template.startswith(("http://", "https://")):
+        return None
+    before, after = template.split("{" + names[0] + "}")
+    return before, names[0].strip(), after
+
+
+def _template_urls(table: ResultsTable, template: str) -> tuple[str, dict[str, str]] | str:
+    """
+    (column, {page URL: column value}) for each distinct value of the template's column,
+    or an error message.
+    """
+    parts = _template_parts(template)
+    if parts is None:
+        return "Error: 'url_template' must be a page URL with one {Column} placeholder, e.g. https://site/item/{ID}."
+    before, name, after = parts
+    column = _column(table, name)
+    if not column:
+        return f"Error: the results table has no column {name!r}; columns are {table.columns}."
+    values = list(dict.fromkeys(row[column] for row in table.snapshot() if row[column]))
+    if not values:
+        return f"Error: the {column!r} column is empty, so there are no pages to build."
+    return column, {f"{before}{quote(v, safe='')}{after}": v for v in values}
+
+
+def _template_value(template: str, url: str) -> str:
+    """The column value a templated page URL was built from."""
+    parts = _template_parts(template)
+    if parts is None or not url.startswith(parts[0]) or not url.endswith(parts[2]):
+        return ""
+    return unquote(url[len(parts[0]):len(url) - len(parts[2])])
+
+
 def _table_summary(table: ResultsTable) -> str:
     return f"Results table now has {len(table)} rows with columns {table.columns}."
 
@@ -604,12 +666,23 @@ def _tool_extract(
 ) -> str:
     urls = _str_list(args.get("urls"))
     session = str(args.get("session") or "").strip()
-    if not urls and not session:
-        return "Error: 'urls' must be a non-empty list of URLs (or pass a browser session)."
+    template = "" if booths else str(args.get("url_template") or "").strip()
+    if not urls and not session and not template:
+        return "Error: 'urls' must be a non-empty list of URLs (or pass url_template or a browser session)."
     fields = list(BOOTH_FIELDS) if booths else _str_list(args.get("fields"))
     if not fields:
         return "Error: 'fields' is required, e.g. [\"Product Name\", \"Price\"]."
-    error = table.prepare(fields, _str_list(args.get("key_fields")) or None, _flag(args, "replace"))
+    fill: tuple[str, dict[str, str]] | None = None
+    if template and not urls:
+        built = _template_urls(table, template)
+        if isinstance(built, str):
+            return built
+        fill = built
+        urls = list(built[1])
+        fields = [built[0], *(f for f in fields if f.casefold() != built[0].casefold())]
+        error = table.prepare(fields, list(table.key_fields))
+    else:
+        error = table.prepare(fields, _str_list(args.get("key_fields")) or None, _flag(args, "replace"))
     if error:
         return error
     if session and not urls:
@@ -621,12 +694,13 @@ def _tool_extract(
     emit("status", {"text": f"📄 Extracting {len(urls)} page{'s' if len(urls) != 1 else ''}…"})
     lines = _extract_urls(
         urls, None if booths else fields, str(args.get("instructions") or ""), _flag(args, "refresh"),
-        table, emit, max(SCRAPE_CONCURRENCY, EXTRACT_CONCURRENCY),
+        table, emit, max(SCRAPE_CONCURRENCY, EXTRACT_CONCURRENCY), fill=fill,
     )
     if skipped:
+        how = "start_job with the same url_template" if fill else "start_job instead of more extract calls"
         lines.append(
             f"Not processed (over the {MAX_URLS_PER_CALL}-URL limit): {len(skipped)} URLs. "
-            f"For more than {jobs.JOB_MIN_URLS} pages use start_job instead of more extract calls."
+            f"For more than {jobs.JOB_MIN_URLS} pages use {how}."
         )
     lines.append(_table_summary(table))
     return "\n".join(lines)
@@ -642,8 +716,13 @@ def _extract_urls(
     workers: int,
     url_field: str = "",
     failed: list[tuple[str, str]] | None = None,
+    fill: tuple[str, dict[str, str]] | None = None,
 ) -> list[str]:
-    """Extract *fields* (None = booth rows) from each URL into *table*; one line per URL."""
+    """
+    Extract *fields* (None = booth rows) from each URL into *table*; one line per URL.
+    With *fill* = (column, {url: value}), each page's rows get that column value and
+    fill the rows sharing it instead of adding new ones.
+    """
     # Booth rows are normalised by the booth prompt, so a recipe could never reproduce them.
     layouts = _PageRecipes(urls, fields, refresh) if recipes.RECIPES_ENABLED and fields else None
     columns = fields or list(BOOTH_FIELDS)
@@ -664,8 +743,12 @@ def _extract_urls(
         if url_field:
             for row in rows:
                 row[url_field] = url
+        if fill:
+            for row in rows:
+                row[fill[0]] = fill[1].get(url, "")
         return rows
 
+    merge: Merge | None = (lambda rows: table.fill(fill[0], rows)) if fill else None
     leaders = layouts.leaders() if layouts else []
     rest = [i for i in range(len(urls)) if i not in leaders]
     lines: list[str] = []
@@ -673,7 +756,7 @@ def _extract_urls(
         if group:
             lines += _collect(
                 [urls[i] for i in group], lambda j, g=group: work(g[j]),
-                workers, table, emit, "Extracted", failed,
+                workers, table, emit, "Extracted", failed, merge,
             )
     if layouts and layouts.uses:
         recipes.record_uses(layouts.uses)
@@ -683,9 +766,15 @@ def _extract_urls(
 
 def _job_batch(urls: list[str], job: jobs.Job, table: ResultsTable) -> list[tuple[str, str]]:
     failed: list[tuple[str, str]] = []
+    fill = None
+    if job.url_template:
+        parts = _template_parts(job.url_template)
+        column = _column(table, parts[1]) if parts else ""
+        if column:
+            fill = (column, {u: _template_value(job.url_template, u) for u in urls})
     _extract_urls(
         urls, job.fields, job.instructions, False, table, lambda _t, _p: None,
-        jobs.JOB_PAGE_CONCURRENCY, job.url_field, failed,
+        jobs.JOB_PAGE_CONCURRENCY, job.url_field, failed, fill,
     )
     return failed
 
@@ -703,19 +792,27 @@ def _tool_start_job(args: dict[str, Any], table: ResultsTable, emit: Emit) -> st
         return "Error: 'fields' is required, e.g. [\"Product Name\", \"Price\"]."
     url_column = str(args.get("url_column") or "").strip()
     sitemap = str(args.get("sitemap") or "").strip()
-    sources = [bool(_str_list(args.get("urls"))), bool(url_column), bool(sitemap)]
+    template = str(args.get("url_template") or "").strip()
+    sources = [bool(_str_list(args.get("urls"))), bool(url_column), bool(sitemap), bool(template)]
     if sum(sources) != 1:
-        return "Error: give exactly one URL source: 'urls', 'url_column' or 'sitemap'."
+        return "Error: give exactly one URL source: 'urls', 'url_column', 'sitemap' or 'url_template'."
 
     key_fields = _str_list(args.get("key_fields"))
     url_field = ""
     if url_column:
-        url_field = next((c for c in table.columns if c.casefold() == url_column.casefold()), "")
+        url_field = _column(table, url_column)
         if not url_field:
             return f"Error: the results table has no column {url_column!r}; columns are {table.columns}."
         urls = [row[url_field] for row in table.snapshot()]
         fields = fields if url_field in fields else [url_field, *fields]
         key_fields = key_fields or [url_field]
+    elif template:
+        built = _template_urls(table, template)
+        if isinstance(built, str):
+            return built
+        urls = list(built[1])
+        fields = [built[0], *(f for f in fields if f.casefold() != built[0].casefold())]
+        key_fields = list(table.key_fields)
     elif sitemap:
         emit("status", {"text": f"🗺️ Reading the sitemap of {site_feeds.origin(sitemap)}"})
         urls, _ = site_feeds.map_site(sitemap, str(args.get("include") or ""), jobs.MAX_JOB_URLS, False)
@@ -730,7 +827,7 @@ def _tool_start_job(args: dict[str, Any], table: ResultsTable, emit: Emit) -> st
     error = table.prepare(fields, key_fields or None, _flag(args, "replace"))
     if error:
         return error
-    jobs.create(table, fields, table.key_fields, str(args.get("instructions") or ""), urls, url_field)
+    jobs.create(table, fields, table.key_fields, str(args.get("instructions") or ""), urls, url_field, template)
     emit("status", {"text": f"🚀 Started a background job for {len(urls):,} pages"})
     _emit_results(table, emit)
     minutes = max(1, round(len(urls) * 1.5 / jobs.JOB_PAGE_CONCURRENCY / 60))
@@ -804,20 +901,60 @@ def _tool_read_feed(args: dict[str, Any], table: ResultsTable, emit: Emit) -> st
         return "Error: 'fields' is required, e.g. [\"Product Name\", \"URL\"]."
     refresh = _flag(args, "refresh")
     site = site_feeds.origin(url)
-
-    emit("status", {"text": f"⚡ Reading the {feed_id} feed from {site}"})
-    records = site_feeds.read_feed(url, feed_id, refresh)
-    if not records:
-        return f"The {feed_id} feed returned no records."
-    error = table.prepare(fields, _str_list(args.get("key_fields")) or None, _flag(args, "replace"))
-    if error:
-        return error
+    id_column = str(args.get("id_column") or "").strip()
+    kind = site_feeds.feed_kind(url, feed_id)
+    if kind == "lookup" and not id_column:
+        return (
+            f"Error: {feed_id} is a detail lookup (one item per ID). Pass id_column=<the results "
+            "column holding the IDs, e.g. from a list feed> to fetch the details of every row."
+        )
+    if id_column and kind != "lookup":
+        return (
+            f"Error: id_column only works with a detail lookup feed, and {feed_id} is not one. "
+            "Call capture_api on one item's page to find its lookup feed."
+        )
 
     user_instructions = str(args.get("instructions") or "").strip()
+    rule = "output one row per record that matches the request."
+    merge: Merge = table.add
+    if id_column:
+        column = _column(table, id_column)
+        if not column:
+            return f"Error: the results table has no column {id_column!r}; columns are {table.columns}."
+        ids = list(dict.fromkeys(row[column] for row in table.snapshot() if row[column]))
+        if not ids:
+            return f"Error: the {column!r} column is empty, so there are no IDs to look up."
+        fields = [column, *(f for f in fields if f.casefold() != column.casefold())]
+        error = table.prepare(fields, list(table.key_fields))
+        if error:
+            return error
+        emit("status", {"text": f"🔎 Looking up details for {len(ids):,} IDs on {site}"})
+        pairs, notes = site_feeds.read_lookup(
+            url, feed_id, ids, lambda done, total: emit("status", {"text": f"🔎 Looked up {done:,}/{total:,} IDs"}),
+        )
+        records = [{column: i, **record} for i, record in pairs]
+        if not records:
+            return "\n".join([f"The {feed_id} lookup returned no records for {len(ids):,} IDs.", *notes])
+        rule = f"output exactly one row per record, copying its {column!r} value unchanged."
+        merge = lambda rows: table.fill(column, rows)  # noqa: E731
+        heading = f"Feed {feed_id}: looked up {len(ids):,} IDs from {column!r}, {len(records):,} records."
+    else:
+        letters = str(args.get("letters") or "").strip()
+        emit("status", {"text": f"⚡ Reading the {feed_id} feed from {site}"})
+        records, notes = site_feeds.read_feed(url, feed_id, refresh, letters=letters)
+        if not records:
+            return "\n".join([f"The {feed_id} feed returned no records.", *notes])
+        error = table.prepare(fields, _str_list(args.get("key_fields")) or None, _flag(args, "replace"))
+        if error:
+            return error
+        covered = f" for letters {letters}" if letters else " for every letter A–Z and #" if kind == "letters" else ""
+        heading = f"Feed {feed_id}: {len(records):,} records read{covered}."
+    if notes:
+        heading += "\nNot read: " + "; ".join(notes)
+
     instructions = (
         f"{user_instructions}\n"
-        "Each line is one JSON record from the site's data feed; output one row per "
-        "record that matches the request."
+        f"Each line is one JSON record from the site's data feed; {rule}"
     ).strip()
     batches = _record_batches(records)
     emit("status", {"text": f"⚡ Got {len(records)} records, filling in your columns…"})
@@ -844,19 +981,19 @@ def _tool_read_feed(args: dict[str, Any], table: ResultsTable, emit: Emit) -> st
                 learned_from_first = True
 
     if recipe is None:
-        lines = _collect(labels, work, EXTRACT_CONCURRENCY, table, emit, "Mapped")
+        lines = _collect(labels, work, EXTRACT_CONCURRENCY, table, emit, "Mapped", merge=merge)
     else:
         # The first batch is already cached when the recipe was just learned from it.
-        lines = _collect(labels[:1], work, 1, table, emit, "Mapped") if learned_from_first else []
+        lines = _collect(labels[:1], work, 1, table, emit, "Mapped", merge=merge) if learned_from_first else []
         remaining = records[batches[1][0]:] if learned_from_first else records
         rows = recipes.apply_feed(recipe, remaining, fields)
-        added, updated = table.add(rows)
+        added, updated = merge(rows)
         _emit_results(table, emit)
         recipes.record_uses({recipe_key: 1})
-        emit("status", {"text": f"⚡ Mapped {len(remaining)} records instantly with the learned field mapping"})
+        emit("status", {"text": f"⚡ Mapped {len(remaining):,} records instantly with the learned field mapping"})
         merged = f", {updated} existing rows filled in" if updated else ""
-        lines.append(f"- {len(remaining)} records mapped by field (no AI call): {len(rows)} rows, {added} new{merged}")
-    return "\n".join([f"Feed {feed_id}: {len(records)} records read.", *lines, _table_summary(table)])
+        lines.append(f"- {len(remaining):,} records mapped by field (no AI call): {len(rows):,} rows, {added} new{merged}")
+    return "\n".join([heading, *lines, _table_summary(table)])
 
 
 def _tool_capture_api(args: dict[str, Any], emit: Emit) -> str:
@@ -946,7 +1083,9 @@ def _tool_session(name: str, args: dict[str, Any], emit: Emit, sessions: TurnSes
     what = f'{element.get("role", "element")} "{element.get("label", ref)}"'
     if name == "click":
         emit("status", {"text": f"🖱️ Clicking {what}"})
-        return _format_snapshot(sessions.click(sid, ref))
+        snap = sessions.click(sid, ref)
+        note = f"Note: {snap['fallback']}.\n\n" if snap.get("fallback") else ""
+        return note + _format_snapshot(snap)
     if name == "fill":
         emit("status", {"text": f"⌨️ Typing into {what}"})
         return _format_snapshot(sessions.fill(sid, ref, str(args.get("text") or ""), _flag(args, "submit")))
