@@ -61,6 +61,9 @@ class TurnCancelled(Exception):
 
 TOOL_OPEN = "<tool>"
 _TOOL_RE = re.compile(r"<tool>\s*(.*?)\s*(?:</tool>|$)", re.DOTALL)
+# Hermes progress lines not shown: Booth Radar's own tools (they emit clearer status
+# lines) and Hermes' internal tool lookups.
+_HIDDEN_PROGRESS_RE = re.compile(r"\b(?:mcp_+booth[_-]radar_+\w+|tool_search|tool_describe)\b", re.IGNORECASE)
 
 _PERSONA = """\
 You are Booth Radar, a friendly assistant that helps the team collect data from
@@ -853,6 +856,8 @@ def _run_mcp_turn(
         safe_emit("token", {"text": t})
 
     def on_tool_progress(t: str) -> None:
+        if _HIDDEN_PROGRESS_RE.search(t):
+            return
         speak_first(NATIVE_TOOL_PREAMBLE)
         safe_emit("thinking", {"text": t})
 
@@ -931,6 +936,8 @@ def run_turn(
         def on_tool_progress(t: str) -> None:
             # Hermes is running one of its own tools; make sure the user hears from us first.
             nonlocal spoke, native_preamble
+            if _HIDDEN_PROGRESS_RE.search(t):
+                return
             if not spoke:
                 spoke = True
                 native_preamble = ack.take(NATIVE_TOOL_PREAMBLE)

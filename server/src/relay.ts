@@ -68,7 +68,7 @@ interface Turn {
   events: string[];
   clients: Set<Response>;
   finished: boolean;
-  /** Accumulates thinking chunks in-memory so the full text can be persisted on done. */
+  /** Accumulates thinking chunks and status lines in-memory so they can be persisted on done. */
   thinkingBuffer: string;
   attachments: Attachment[];
   /** File inserts still in flight; `done` waits for them before saving the reply. */
@@ -171,6 +171,11 @@ async function persist(turn: Turn, type: WorkerEventType, payload: unknown): Pro
   if (type === 'thinking') {
     // Accumulate in-memory only — no DB write per chunk
     turn.thinkingBuffer += (payload as { text: string }).text;
+  } else if (type === 'status') {
+    // Status lines are shown inside the reasoning block, one per line
+    const buffer = turn.thinkingBuffer;
+    const separator = buffer && !buffer.endsWith('\n') ? '\n' : '';
+    turn.thinkingBuffer = `${buffer}${separator}${(payload as { text: string }).text}\n`;
   } else if (type === 'results') {
     const { results } = payload as { results: ResultRow[] };
     await col.updateOne({ _id: turn.conversationId }, { $set: { results, updatedAt: new Date() } });
