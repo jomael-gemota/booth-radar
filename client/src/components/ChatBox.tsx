@@ -19,6 +19,7 @@ import { logout, type AuthUser } from '../hooks/useAuth'
 import AccountPage from './AccountPage'
 import UserLogsPage from './UserLogsPage'
 import ExportButton from './ExportButton'
+import JobChip from './JobChip'
 import './ChatBox.css'
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -138,6 +139,10 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   const [busy,       setBusy]       = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [loadingConv, setLoadingConv] = useState(false)
+  // Bumped after each turn so the job chip looks for a job the turn started
+  const [jobCheck, setJobCheck] = useState(0)
+  // Job finish messages that arrived mid-turn; shown when the turn ends
+  const pendingJobMessages = useRef<string[]>([])
 
   const bottomRef      = useRef<HTMLDivElement>(null)
   const streamingMsgId = useRef<string | null>(null)
@@ -393,6 +398,10 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     finishStreaming(elapsed)
     setBusy(false)
     setTurnId(null)
+    setJobCheck((n) => n + 1)
+    for (const text of pendingJobMessages.current.splice(0)) {
+      addMessage({ id: genId(), role: 'assistant', text })
+    }
     // Generate a proper title for the first turn of a new conversation
     if (isFirstTurnRef.current && conversationIdRef.current) {
       void generateTitle(conversationIdRef.current)
@@ -424,6 +433,27 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       addMessage({ id: genId(), role: 'status', text: '⏹ Stopped' })
     },
   })
+
+  // ── Background job ─────────────────────────────────────────────────────
+
+  async function refreshResults() {
+    const id = conversationIdRef.current
+    if (!id) return
+    try {
+      const r = await fetch(`/api/conversations/${id}`)
+      if (!r.ok) return
+      const c: ConversationResponse = await r.json()
+      if (conversationIdRef.current === id) setResults(c.results)
+    } catch {
+      // The next batch refreshes again
+    }
+  }
+
+  function handleJobFinished(text: string) {
+    if (!text) return
+    if (busy) pendingJobMessages.current.push(text)
+    else addMessage({ id: genId(), role: 'assistant', text })
+  }
 
   // ── Send message ───────────────────────────────────────────────────────
 
@@ -845,6 +875,12 @@ export default function ChatBox({ user }: { user: AuthUser }) {
                 </div>
 
                 <div className="input-area">
+                  <JobChip
+                    conversationId={conversationId}
+                    checkKey={jobCheck}
+                    onProgress={() => void refreshResults()}
+                    onFinished={handleJobFinished}
+                  />
                   {renderInputForm()}
                 </div>
               </>

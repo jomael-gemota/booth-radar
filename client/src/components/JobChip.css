@@ -1,0 +1,73 @@
+.job-chip {
+  max-width: 780px;
+  margin: 0 auto 8px;
+  padding: 8px 12px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.job-chip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.job-chip-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-chip-text strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.job-chip-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.job-chip-actions button {
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.job-chip-actions button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.job-chip-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.job-chip-bar {
+  height: 3px;
+  margin: 8px -12px 0;
+  background: var(--accent-dim);
+}
+
+.job-chip-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+.job-chip--paused .job-chip-bar-fill {
+  background: var(--text-faint);
+}
