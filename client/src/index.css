@@ -60,7 +60,7 @@ body {
   color-scheme: light;
 }
 
-/* ── Radar Logo GIF (pre-cropped to the orb, transparent outside it) ────── */
+/* ── Radar Logo (animated WebP with alpha — background already transparent) */
 
 .radar-logo {
   background: transparent;
