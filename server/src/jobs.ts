@@ -36,6 +36,8 @@ export interface JobDoc {
   keyFields: string[];
   instructions: string;
   urlField: string;
+  /** Pages built from a results column; their rows fill the rows sharing its value. */
+  urlTemplate?: string;
   urls: string[];
   cursor: number;
   rowsAdded: number;
@@ -71,6 +73,7 @@ interface JobSpecPayload {
   keyFields: string[];
   instructions: string;
   urlField: string;
+  urlTemplate?: string;
   urls: string[];
 }
 
@@ -129,6 +132,7 @@ function spec(job: JobDoc): JobSpecPayload {
     keyFields: job.keyFields,
     instructions: job.instructions,
     urlField: job.urlField,
+    urlTemplate: job.urlTemplate ?? '',
     urls: job.urls,
   };
 }
@@ -173,6 +177,7 @@ async function created(payload: JobSpecPayload): Promise<void> {
     keyFields: payload.keyFields,
     instructions: payload.instructions,
     urlField: payload.urlField,
+    ...(payload.urlTemplate ? { urlTemplate: payload.urlTemplate } : {}),
     urls: payload.urls,
     cursor: 0,
     rowsAdded: 0,
