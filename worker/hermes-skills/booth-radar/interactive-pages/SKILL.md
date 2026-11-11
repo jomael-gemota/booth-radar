@@ -42,5 +42,8 @@ URLs instead: it is faster and runs in parallel.
 
 - "element … is not on the page any more": take a new `snapshot` and use its refs.
 - A cookie or consent banner hiding the page: click its accept or close button first.
-- Don't click through many pages one by one with `click`; use `paginate`.
+- Don't click through many pages one by one with `click`; use `paginate`. To read
+  many item pages, use `extract`/`start_job` with their URLs (or `url_template`).
+- A click that the page blocks (covered or moving element) is retried by opening the
+  link's address or forcing the click; the result says which.
 - Sessions close when your reply ends; open a new one in the next reply.
