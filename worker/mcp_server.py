@@ -29,7 +29,8 @@ server = MCPServer(
         "Booth Radar's website data tools. Always pass the `turn` id given in your "
         "instructions. Use these tools for every website request: find_feeds first, "
         "read_feed when a feed has the items, capture_api on listing pages without a "
-        "feed, otherwise map_site or fetch_page to find pages and extract."
+        "feed, otherwise map_site or fetch_page to find pages and extract. Use navigate "
+        "and the interaction tools when data only appears after clicks or scrolling."
     ),
 )
 
@@ -124,22 +125,87 @@ async def fetch_page(
 
 @server.tool(structured_output=False)
 async def extract(
-    urls: list[str],
     fields: list[str],
+    urls: list[str] | None = None,
     turn: str = "",
     instructions: str = "",
     key_fields: list[str] | None = None,
     refresh: bool = False,
     replace: bool = False,
+    session: str = "",
 ) -> str:
     """
     Scrape each URL in parallel and extract one row per matching item with the
     requested fields (e.g. ["Product Name", "Price", "URL"]) into the user's results
     table. Rows matching existing ones on `key_fields` fill in their empty cells.
+    Pass `session` instead of `urls` to extract from a browser session's current page.
     """
     return await _call(
-        "extract", turn, urls=urls, fields=fields, instructions=instructions,
-        key_fields=key_fields or [], refresh=refresh, replace=replace,
+        "extract", turn, urls=urls or [], fields=fields, instructions=instructions,
+        key_fields=key_fields or [], refresh=refresh, replace=replace, session=session,
+    )
+
+
+@server.tool(structured_output=False)
+async def navigate(url: str, turn: str = "", session: str = "") -> str:
+    """
+    Open a page in a browser session you can interact with (new session if none is
+    given; ids s1, s2…). Returns the page's clickable elements with refs (e1, e2…) and
+    its text. Use it when data only appears after clicking, filtering, searching or
+    scrolling.
+    """
+    return await _call("navigate", turn, url=url, session=session)
+
+
+@server.tool(structured_output=False)
+async def snapshot(session: str, turn: str = "", offset: int = 0) -> str:
+    """Re-read a session's current page (elements and text); `offset` reads further down."""
+    return await _call("snapshot", turn, session=session, offset=offset)
+
+
+@server.tool(structured_output=False)
+async def click(session: str, ref: str, turn: str = "") -> str:
+    """Click an element by its ref from the latest snapshot; returns the new snapshot."""
+    return await _call("click", turn, session=session, ref=ref)
+
+
+@server.tool(structured_output=False)
+async def fill(session: str, ref: str, text: str, turn: str = "", submit: bool = False) -> str:
+    """Type text into a field (`submit` presses Enter); returns the new snapshot."""
+    return await _call("fill", turn, session=session, ref=ref, text=text, submit=submit)
+
+
+@server.tool(structured_output=False)
+async def select(session: str, ref: str, value: str, turn: str = "") -> str:
+    """Choose a dropdown option by its label or value; returns the new snapshot."""
+    return await _call("select", turn, session=session, ref=ref, value=value)
+
+
+@server.tool(structured_output=False)
+async def scroll_until_end(session: str, turn: str = "", max_rounds: int = 10) -> str:
+    """Scroll until the page stops loading more (infinite scroll), then extract with the session."""
+    return await _call("scroll_until_end", turn, session=session, max_rounds=max_rounds)
+
+
+@server.tool(structured_output=False)
+async def paginate(
+    session: str,
+    next_ref: str,
+    fields: list[str],
+    turn: str = "",
+    max_pages: int = 10,
+    instructions: str = "",
+    key_fields: list[str] | None = None,
+    replace: bool = False,
+) -> str:
+    """
+    Extract the fields from the session's current page, click the "Next" element
+    (next_ref) and repeat up to max_pages pages, filling the results table. For
+    pagination without page URLs.
+    """
+    return await _call(
+        "paginate", turn, session=session, next_ref=next_ref, fields=fields, max_pages=max_pages,
+        instructions=instructions, key_fields=key_fields or [], replace=replace,
     )
 
 
