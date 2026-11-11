@@ -101,6 +101,30 @@ class ResultsTable:
                 updated += filled
         return added, updated
 
+    def fill(self, column: str, rows: list[Row]) -> tuple[int, int]:
+        """
+        Fill the empty cells of every row whose *column* equals an incoming row's
+        value (all brands of one exhibitor get its booth). Incoming rows without a
+        value in *column*, or matching no row, are ignored. Returns (0, rows updated).
+        """
+        updated = 0
+        with self._lock:
+            by_value: dict[str, list[Row]] = {}
+            for row in self.rows:
+                if row.get(column):
+                    by_value.setdefault(row[column].casefold(), []).append(row)
+            for raw in rows:
+                incoming = self._fit(raw)
+                for existing in by_value.get(incoming.get(column, "").casefold(), []) if incoming.get(column) else []:
+                    filled = False
+                    for name, value in incoming.items():
+                        if value and not existing[name]:
+                            existing[name] = value
+                            filled = True
+                    updated += filled
+            self._reindex()
+        return 0, updated
+
     def clear(self) -> str | None:
         """Empty the table; returns an error message while a job is filling it."""
         with self._lock:

@@ -4,6 +4,8 @@ site_feeds.py  –  Read a site's public data feeds and sitemaps instead of rend
   * find_feeds(url)        – WordPress REST content types and Shopify products.json
   * capture_api(url)       – JSON endpoints the page calls while loading (api:N feeds)
   * read_feed(url, feed)   – every record of one feed, flattened to plain fields
+                             (every letter of a letter-filtered feed)
+  * read_lookup(url, feed, ids) – a captured detail endpoint replayed for many IDs
   * map_site(url, include) – page URLs listed in the site's sitemaps
 
 All requests honour robots.txt for the BoothRadar user agent and only reach public hosts.
@@ -20,10 +22,10 @@ import math
 import os
 import re
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from typing import Any, Callable
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -36,7 +38,11 @@ log = logging.getLogger(__name__)
 USER_AGENT       = net_guard.ROBOTS_UA
 FEED_TIMEOUT     = 20
 FEED_CONCURRENCY = 4
-MAX_FEED_RECORDS = int(os.getenv("MAX_FEED_RECORDS", "2000"))
+MAX_FEED_RECORDS = int(os.getenv("MAX_FEED_RECORDS", "10000"))
+LOOKUP_BATCH     = max(1, int(os.getenv("LOOKUP_BATCH", "50")))
+MAX_LOOKUP_IDS   = int(os.getenv("MAX_LOOKUP_IDS", "5000"))
+LETTER_SHARE     = 0.8
+ID_SEARCH_DEPTH  = 6
 MAX_SITEMAPS     = 50
 MAX_TERM_PAGES   = 10
 SAMPLE_KEYS      = 25
@@ -61,6 +67,10 @@ _WP_DROP_KEYS = {
 }
 _TAG_RE = re.compile(r"<[^>]+>")
 _SPACE_RE = re.compile(r"\s+")
+_LETTERS = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
+# Values sites use for the "#" (non-letter) tab, tried in order
+_OTHER_LETTERS = ("#", "0-9")
+_ID_VALUE_RE = re.compile(r"^(\d{2,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", re.IGNORECASE)
 
 
 @dataclass
@@ -76,9 +86,20 @@ class Feed:
     request: dict[str, Any] | None = None
     records_path: str = ""
     paging: "_Paging | None" = None
+    # The one-letter parameter of an A–Z directory endpoint
+    letter: "_Param | None" = None
+    # The ID parameter of a detail endpoint, and how it takes several IDs
+    # ("repeat", "comma" or "single"; "" until the first read_lookup)
+    lookup: "_Param | None" = None
+    lookup_mode: str = ""
 
     def describe(self) -> str:
-        count = f"{self.total:,} records" if self.total is not None else "record count unknown"
+        if self.lookup is not None:
+            count = "one item per ID"
+        elif self.letter is not None:
+            count = "all letters: count known after reading"
+        else:
+            count = f"{self.total:,} records" if self.total is not None else "record count unknown"
         keys = f"; fields: {', '.join(self.sample_keys)}" if self.sample_keys else ""
         return f"- {self.id}: {self.label} ({count}){keys}"
 
@@ -91,6 +112,14 @@ class _Paging:
     kind: str              # "page" or "offset"
     value: int
     as_string: bool
+
+
+@dataclass
+class _Param:
+    """A letter filter or lookup ID inside a captured request."""
+    location: str          # "query" or "body"
+    path: tuple[str, ...]
+    value: Any
 
 
 # ── HTTP ───────────────────────────────────────────────────────────────────
@@ -340,8 +369,26 @@ def _total_in(data: Any, path: tuple[str, ...] = ()) -> int | None:
     return None
 
 
+def _joined(values: list[Any]) -> str:
+    """Distinct non-empty values as one "; "-separated string."""
+    parts: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            text = ", ".join(json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v) for v in value)
+        else:
+            text = json.dumps(value, ensure_ascii=False) if isinstance(value, dict) else str(value)
+        for part in text.split("; "):
+            if part and part not in parts:
+                parts.append(part)
+    return "; ".join(parts)
+
+
 def _flatten_json(record: dict[str, Any], prefix: str = "", depth: int = 0) -> dict[str, Any]:
-    """Nested objects become dotted keys ("price.amount"); HTML values become text."""
+    """
+    Nested objects become dotted keys ("price.amount"), lists of objects one dotted
+    key per field with the distinct values joined ("showrooms.name" = "B1; C2");
+    HTML values become text.
+    """
     out: dict[str, Any] = {}
     for key, value in record.items():
         if key == "__typename":
@@ -349,6 +396,13 @@ def _flatten_json(record: dict[str, Any], prefix: str = "", depth: int = 0) -> d
         name = f"{prefix}{key}"
         if isinstance(value, dict) and depth < FLATTEN_DEPTH:
             out.update(_flatten_json(value, f"{name}.", depth + 1))
+        elif isinstance(value, list) and depth < FLATTEN_DEPTH and any(isinstance(v, dict) for v in value):
+            merged: dict[str, list[Any]] = {}
+            for item in value:
+                if isinstance(item, dict):
+                    for k, v in _flatten_json(item, f"{name}.", depth + 1).items():
+                        merged.setdefault(k, []).append(v)
+            out.update({k: _joined(vs) for k, vs in merged.items()})
         else:
             out[name] = _plain(value)
     return {k: v for k, v in out.items() if v not in ("", None, [], {})}
@@ -392,27 +446,113 @@ def _find_paging(request: dict[str, Any]) -> _Paging | None:
     return None
 
 
-def _with_paging(request: dict[str, Any], paging: _Paging, value: int) -> dict[str, Any]:
+def _set_param(request: dict[str, Any], location: str, path: tuple[str, ...], value: Any) -> dict[str, Any]:
+    """*request* with the parameter at *path* set to *value*; a list repeats a query parameter."""
     out = dict(request)
-    if paging.location == "query":
+    if location == "query":
         parts = urlsplit(request["url"])
-        query = [(k, str(value) if k == paging.path[0] else v) for k, v in parse_qsl(parts.query, keep_blank_values=True)]
+        values = value if isinstance(value, list) else [value]
+        query: list[tuple[str, str]] = []
+        for k, v in parse_qsl(parts.query, keep_blank_values=True):
+            if k != path[0]:
+                query.append((k, v))
+            elif values:
+                query += [(k, str(x)) for x in values]
+                values = []
         out["url"] = urlunsplit(parts._replace(query=urlencode(query)))
         return out
     body = copy.deepcopy(_json_body(request))
     node = body
-    for key in paging.path[:-1]:
+    for key in path[:-1]:
         node = node[key]
-    node[paging.path[-1]] = str(value) if paging.as_string else value
+    node[path[-1]] = value
     out["body"] = json.dumps(body)
     return out
 
 
-def _signature(request: dict[str, Any], paging: _Paging | None, path: tuple[str, ...]) -> str:
+def _with_paging(request: dict[str, Any], paging: _Paging, value: int) -> dict[str, Any]:
+    return _set_param(request, paging.location, paging.path, str(value) if paging.as_string else value)
+
+
+def _params(request: dict[str, Any]) -> list[_Param]:
+    """Every query parameter, and the JSON body's values at the top level and one level down."""
+    found = [_Param("query", (k,), v) for k, v in parse_qsl(urlsplit(request["url"]).query, keep_blank_values=True)]
+    body = _json_body(request)
+    if isinstance(body, dict):
+        nodes: list[tuple[tuple[str, ...], dict[str, Any]]] = [((), body)]
+        nodes += [((k,), v) for k, v in body.items() if isinstance(v, dict)]
+        for prefix, node in nodes:
+            found += [_Param("body", (*prefix, k), v) for k, v in node.items() if not isinstance(v, dict)]
+    return found
+
+
+def _letter(value: Any) -> str:
+    text = value.strip() if isinstance(value, str) else ""
+    if text == "#" or (len(text) == 1 and text.isascii() and text.isalpha()):
+        return text.upper()
+    return ""
+
+
+def _starts_with(record: dict[str, Any], letter: str) -> bool:
+    """Whether a name-like value of *record* starts with *letter* ("#": with a non-letter)."""
+    for value in record.values():
+        text = value.strip() if isinstance(value, str) else ""
+        if not re.search(r"[A-Za-z]", text):
+            continue
+        if (not text[0].isalpha()) if letter == "#" else text[0].upper() == letter:
+            return True
+    return False
+
+
+def _find_letter(request: dict[str, Any], records: list[dict[str, Any]]) -> _Param | None:
+    """The parameter holding one letter that most records start with (an A–Z directory)."""
+    for param in _params(request):
+        letter = _letter(param.value)
+        if letter and sum(_starts_with(r, letter) for r in records) >= LETTER_SHARE * len(records):
+            return param
+    return None
+
+
+def _is_id_name(key: str) -> bool:
+    return key.lower().endswith(("id", "ids"))
+
+
+def _find_lookup(request: dict[str, Any], page_url: str, records: list[dict[str, Any]]) -> _Param | None:
+    """
+    The parameter holding the ID of the item a detail page shows: its value is part of
+    the page URL (/exhibitor/97991 → exhibitorIds=97991), or, for a single-record
+    response, its name ends in "id"/"ids" and its value looks like an ID.
+    """
+    parts = urlsplit(page_url)
+    on_page = {unquote(s) for s in parts.path.split("/") if s} | {v for _, v in parse_qsl(parts.query)}
+    on_page = {v for v in on_page if len(v) >= 2}
+    candidates = [
+        (p, [str(v) for v in (p.value if isinstance(p.value, list) else [p.value])])
+        for p in _params(request)
+        if p.value not in ("", None, []) and not isinstance(p.value, bool)
+    ]
+    for param, values in candidates:
+        id_like = all(_ID_VALUE_RE.match(v) for v in values)
+        if any(v in on_page for v in values) and (id_like or _is_id_name(param.path[-1])):
+            return param
+    if len(records) == 1:
+        for param, values in candidates:
+            if _is_id_name(param.path[-1]) and all(_ID_VALUE_RE.match(v) for v in values):
+                return param
+    return None
+
+
+def _signature(request: dict[str, Any], skip: list[Any], path: tuple[str, ...]) -> str:
+    """Identifies an endpoint across captures; the paging, letter and lookup values in *skip* are left out."""
     parts = urlsplit(request["url"])
-    skip = paging.path[0] if paging and paging.location == "query" else None
-    query = sorted((k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != skip)
+    names = {p.path[0] for p in skip if p is not None and p.location == "query"}
+    query = sorted((k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in names)
     return f"{request['method']} {parts.netloc}{parts.path}?{urlencode(query)} {'.'.join(path)}"
+
+
+def _feed_signature(feed: Feed) -> str:
+    path = tuple(feed.records_path.split(".")) if feed.records_path else ()
+    return _signature(feed.request or {}, [feed.paging, feed.letter, feed.lookup], path)
 
 
 def _replay(request: dict[str, Any]) -> Any:
@@ -433,34 +573,53 @@ def _replay(request: dict[str, Any]) -> Any:
     return data
 
 
-def _api_label(request: dict[str, Any], path: tuple[str, ...], paging: _Paging | None, per_page: int) -> str:
+def _api_label(
+    request: dict[str, Any], path: tuple[str, ...], paging: _Paging | None, per_page: int,
+    letter: _Param | None, lookup: _Param | None,
+) -> str:
     parts = urlsplit(request["url"])
+    endpoint = f"{request['method']} {parts.netloc}{parts.path}"
+    if lookup is not None:
+        return (
+            f"{endpoint} — detail lookup: one item per {'.'.join(lookup.path)!r} value. Read it with "
+            "read_feed and id_column=<the results column holding these IDs> to fetch every row's details"
+        )
     where = f"records at {'.'.join(path)}" if path else "top-level records"
     if paging is None:
         pages = "single page (no page or offset parameter found)"
     else:
         pages = f"{per_page} per page, pages by {paging.kind} parameter {'.'.join(paging.path)!r}"
-    return f"{request['method']} {parts.netloc}{parts.path} — {where}, {pages}"
+    if letter is not None:
+        pages += (
+            f"; filtered to letter {letter.value!r} by parameter {'.'.join(letter.path)!r} "
+            f"({per_page} records for that letter). read_feed reads every letter A–Z and #"
+        )
+    return f"{endpoint} — {where}, {pages}"
 
 
 def capture_api(url: str, scroll: bool = False) -> list[Feed]:
     """
     Load *url* in the browser, record the JSON endpoints it calls that return lists of
-    records, and register them as api:N feeds of the site (readable with read_feed).
+    records (or one item's details), and register them as api:N feeds of the site
+    (readable with read_feed, or read_lookup for detail endpoints).
     """
     site = origin(url)
     known = list(page_cache.api_feeds.get(site) or [])
-    by_signature = {_signature(f.request, f.paging, tuple(f.records_path.split(".")) if f.records_path else ()): f for f in known}
+    by_signature = {_feed_signature(f): f for f in known}
     next_id = 1 + max((int(f.id.split(":")[1]) for f in known), default=0)
 
     found: dict[str, tuple[int, Feed]] = {}
     for capture in scraper.capture_json(url, scroll):
         path, records = _records_at(capture["data"])
-        if len(records) < MIN_API_RECORDS:
+        if not records:
             continue
         request = {k: capture[k] for k in ("method", "url", "headers", "body")}
+        letter = _find_letter(request, records) if len(records) >= MIN_API_RECORDS else None
+        lookup = None if letter else _find_lookup(request, url, records)
+        if lookup is None and len(records) < MIN_API_RECORDS:
+            continue
         paging = _find_paging(request)
-        signature = _signature(request, paging, path)
+        signature = _signature(request, [paging, letter, lookup], path)
         if signature in found:
             continue
         feed = by_signature.get(signature)
@@ -468,23 +627,37 @@ def capture_api(url: str, scroll: bool = False) -> list[Feed]:
             feed = Feed(f"api:{next_id}", "", request["url"])
             next_id += 1
         feed.request, feed.paging, feed.records_path = request, paging, ".".join(path)
-        feed.label = _api_label(request, path, paging, len(records))
-        feed.total = _total_in(capture["data"], path) or (len(records) if paging is None else None)
-        feed.sample_keys = list(_flatten_json(records[0]).keys())[:SAMPLE_KEYS]
-        found[signature] = (len(records), feed)
+        feed.letter, feed.lookup = letter, lookup
+        if lookup is None:
+            feed.lookup_mode = ""
+        feed.label = _api_label(request, path, paging, len(records), letter, lookup)
+        if letter or lookup:
+            feed.total = None
+        else:
+            feed.total = _total_in(capture["data"], path) or (len(records) if paging is None else None)
+        keys = list(_flatten_json(records[0]).keys())
+        feed.sample_keys = keys[:SAMPLE_KEYS]
+        # Lists rank by size; detail lookups by how much each item carries.
+        found[signature] = (len(keys) if lookup else len(records), feed)
 
-    feeds = [f for _, f in sorted(found.values(), key=lambda item: -item[0])][:MAX_API_FEEDS]
+    ranked = [f for _, f in sorted(found.values(), key=lambda item: -item[0])]
+    feeds = [f for f in ranked if f.lookup is None][:MAX_API_FEEDS]
+    feeds += [f for f in ranked if f.lookup is not None][:MAX_API_FEEDS // 2]
     ids = {f.id for f in feeds}
     page_cache.api_feeds.set(site, [f for f in known if f.id not in ids] + feeds)
     log.info("[feeds] %s: captured %s", url, [f.id for f in feeds] or "no JSON record endpoints")
     return feeds
 
 
-def _read_api(feed: Feed, limit: int) -> list[dict[str, Any]]:
-    request, paging = feed.request or {}, feed.paging
-    path = tuple(feed.records_path.split(".")) if feed.records_path else ()
+def _records_path(feed: Feed) -> tuple[str, ...]:
+    return tuple(feed.records_path.split(".")) if feed.records_path else ()
+
+
+def _read_pages(feed: Feed, request: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    """Every page of records *request* returns (by the feed's paging), unflattened."""
+    paging, path = feed.paging, _records_path(feed)
     if paging is None:
-        return [_flatten_json(r) for r in _records_from(_replay(request), path)[:limit]]
+        return _records_from(_replay(request), path)[:limit]
 
     # Start from the first page even if the browser captured a later one.
     value = 0 if paging.kind == "offset" or paging.value == 0 else 1
@@ -502,7 +675,130 @@ def _read_api(feed: Feed, limit: int) -> list[dict[str, Any]]:
         if len(records) >= limit or (total and len(records) >= total):
             break
         value += 1 if paging.kind == "page" else len(page)
-    return [_flatten_json(r) for r in records[:limit]]
+    return records[:limit]
+
+
+def _letter_values(letters: str) -> list[str]:
+    """"" means every letter and "#"; otherwise e.g. "A-C", "A,B,#" or "#"."""
+    if not letters.strip():
+        return [*_LETTERS, "#"]
+    out: list[str] = []
+    for part in re.split(r"[,\s]+", letters.upper().strip()):
+        if re.fullmatch(r"[A-Z]-[A-Z]", part):
+            out += [chr(c) for c in range(ord(part[0]), ord(part[2]) + 1)]
+        elif part == "#" or re.fullmatch(r"[A-Z]", part):
+            out.append(part)
+    return list(dict.fromkeys(out))
+
+
+def _read_letters(feed: Feed, limit: int, letters: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Every letter's records of a letter-filtered feed, without duplicates; plus notes on failed letters."""
+    param = feed.letter
+    assert param is not None and feed.request is not None
+    lower = str(param.value).islower()
+
+    def read(letter: str) -> tuple[list[dict[str, Any]], str]:
+        error = "no records"
+        for value in _OTHER_LETTERS if letter == "#" else (letter.lower() if lower else letter,):
+            try:
+                records = _read_pages(feed, _set_param(feed.request or {}, param.location, param.path, value), limit)
+            except Exception as exc:
+                error = str(exc)
+                continue
+            if records:
+                return records, ""
+        return [], error
+
+    wanted = _letter_values(letters)
+    with ThreadPoolExecutor(FEED_CONCURRENCY) as pool:
+        results = list(pool.map(read, wanted))
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    notes: list[str] = []
+    for letter, (got, error) in zip(wanted, results):
+        if not got:
+            notes.append(f"letter {letter}: {error}")
+        for record in got:
+            key = json.dumps(record, sort_keys=True, default=str)
+            if key not in seen:
+                seen.add(key)
+                records.append(record)
+    if len(records) > limit:
+        notes.append(f"stopped at the {limit:,}-record limit")
+    return records[:limit], notes
+
+
+def _read_api(feed: Feed, limit: int, letters: str) -> tuple[list[dict[str, Any]], list[str]]:
+    if feed.letter is not None:
+        records, notes = _read_letters(feed, limit, letters)
+    else:
+        records = _read_pages(feed, feed.request or {}, limit)
+        notes = [f"{feed.id} has no letter filter, so it was read as captured"] if letters.strip() else []
+    return [_flatten_json(r) for r in records], notes
+
+
+def _scalars(data: Any, depth: int = 0) -> set[str]:
+    if isinstance(data, dict) and depth < ID_SEARCH_DEPTH:
+        return {s for v in data.values() for s in _scalars(v, depth + 1)}
+    if isinstance(data, list) and depth < ID_SEARCH_DEPTH:
+        return {s for v in data for s in _scalars(v, depth + 1)}
+    if isinstance(data, (str, int)) and not isinstance(data, bool):
+        return {str(data).strip()}
+    return set()
+
+
+def _match_ids(ids: list[str], records: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    """Pair each record with the requested ID it contains (request order when none does)."""
+    if len(ids) == 1:
+        return [(ids[0], r) for r in records]
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    for i, record in enumerate(records):
+        values = _scalars(record)
+        if len(records) == len(ids) and ids[i] in values:
+            pairs.append((ids[i], record))
+        elif hits := [x for x in ids if x in values]:
+            pairs.append((hits[0], record))
+    if not pairs and len(records) == len(ids):
+        return list(zip(ids, records))
+    return pairs
+
+
+def _typed(like: Any, value: str) -> Any:
+    sample = like[0] if isinstance(like, list) and like else like
+    return int(value) if isinstance(sample, int) and not isinstance(sample, bool) and value.isdigit() else value
+
+
+def _lookup_request(feed: Feed, ids: list[str], mode: str) -> dict[str, Any]:
+    param = feed.lookup
+    assert param is not None and feed.request is not None
+    value: Any
+    if mode == "comma":
+        value = ",".join(ids)
+    elif param.location == "query" or isinstance(param.value, list) or len(ids) > 1:
+        value = [_typed(param.value, i) for i in ids]
+    else:
+        value = _typed(param.value, ids[0])
+    return _set_param(feed.request, param.location, param.path, value)
+
+
+def _lookup_once(feed: Feed, ids: list[str], mode: str) -> list[tuple[str, dict[str, Any]]]:
+    records = _records_from(_replay(_lookup_request(feed, ids, mode)), _records_path(feed))
+    return _match_ids(ids, records)
+
+
+def _probe_lookup_mode(feed: Feed, ids: list[str]) -> str:
+    """How the endpoint takes several IDs: a repeated parameter, a comma list, or one per call."""
+    sample = ids[:3]
+    if len(sample) >= 2:
+        for mode in ("repeat", "comma"):
+            try:
+                matched = _lookup_once(feed, sample, mode)
+            except Exception as exc:
+                log.info("[feeds] %s lookup with %s IDs failed: %s", feed.id, mode, exc)
+                continue
+            if len({i for i, _ in matched}) >= 2:
+                return mode
+    return "single"
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
@@ -520,12 +816,8 @@ def find_feeds(url: str, refresh: bool = False) -> list[Feed]:
     return feeds
 
 
-def read_feed(url: str, feed_id: str, refresh: bool = False, limit: int = MAX_FEED_RECORDS) -> list[dict[str, Any]]:
+def _feed(url: str, feed_id: str, refresh: bool = False) -> Feed:
     site = origin(url)
-    key = f"{site}|{feed_id}|{limit}"
-    cached = None if refresh else page_cache.feed_records.get(key)
-    if cached is not None:
-        return cached
     api = feed_id.startswith("api:")
     candidates = (page_cache.api_feeds.get(site) or []) if api else find_feeds(url, refresh)
     feeds = {f.id: f for f in candidates}
@@ -535,15 +827,91 @@ def read_feed(url: str, feed_id: str, refresh: bool = False, limit: int = MAX_FE
             raise ValueError(f"Unknown feed {feed_id!r} for {site}. Captured endpoints expire after an hour; call capture_api again.")
         known = ", ".join(feeds) or "none"
         raise ValueError(f"Unknown feed {feed_id!r} for {site}. Available: {known}")
-    if api:
-        records = _read_api(feed, limit)
+    return feed
+
+
+def read_feed(
+    url: str, feed_id: str, refresh: bool = False, limit: int = MAX_FEED_RECORDS, letters: str = "",
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """
+    Every record of one feed, and notes on parts that could not be read. A
+    letter-filtered API feed is read for every letter, or only those in *letters*.
+    """
+    site = origin(url)
+    key = f"{site}|{feed_id}|{limit}|{letters.strip().upper()}"
+    cached = None if refresh else page_cache.feed_records.get(key)
+    if cached is not None:
+        return cached, []
+    feed = _feed(url, feed_id, refresh)
+    notes: list[str] = []
+    if feed_id.startswith("api:"):
+        records, notes = _read_api(feed, limit, letters)
     elif feed_id.startswith("shopify:"):
         records = _read_shopify(feed, limit)
     else:
         records = _read_wp(feed, limit)
     log.info("[feeds] read %d records from %s %s", len(records), site, feed_id)
-    page_cache.feed_records.set(key, records)
-    return records
+    if not notes:
+        page_cache.feed_records.set(key, records)
+    return records, notes
+
+
+def feed_kind(url: str, feed_id: str) -> str:
+    """"lookup" (detail endpoint), "letters" (A–Z directory endpoint) or "" (a plain list, or unknown)."""
+    if not feed_id.startswith("api:"):
+        return ""
+    try:
+        feed = _feed(url, feed_id)
+    except ValueError:
+        return ""
+    return "lookup" if feed.lookup is not None else "letters" if feed.letter is not None else ""
+
+
+def read_lookup(
+    url: str, feed_id: str, ids: list[str], progress: Callable[[int, int], None] | None = None,
+) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
+    """
+    Replay a captured detail endpoint for each ID (batched when it takes several):
+    (ID, flattened record) pairs in ID order, and notes on IDs that failed or had no record.
+    """
+    feed = _feed(url, feed_id)
+    if feed.lookup is None:
+        raise ValueError(f"{feed_id} is not a detail lookup; read it with read_feed without id_column.")
+    ids = list(dict.fromkeys(str(i).strip() for i in ids if str(i).strip()))
+    notes = [f"only the first {MAX_LOOKUP_IDS:,} of {len(ids):,} IDs were looked up"] if len(ids) > MAX_LOOKUP_IDS else []
+    ids = ids[:MAX_LOOKUP_IDS]
+    if not ids:
+        return [], notes
+    if not feed.lookup_mode:
+        feed.lookup_mode = _probe_lookup_mode(feed, ids)
+        log.info("[feeds] %s takes IDs as %s", feed.id, feed.lookup_mode)
+    size = 1 if feed.lookup_mode == "single" else LOOKUP_BATCH
+    batches = [ids[i:i + size] for i in range(0, len(ids), size)]
+
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    failed: list[str] = []
+    done = 0
+    with ThreadPoolExecutor(FEED_CONCURRENCY) as pool:
+        futures = {pool.submit(_lookup_once, feed, batch, feed.lookup_mode): batch for batch in batches}
+        for future in as_completed(futures):
+            batch = futures[future]
+            try:
+                pairs += future.result()
+            except Exception as exc:
+                log.info("[feeds] %s lookup of %d IDs failed: %s", feed.id, len(batch), exc)
+                failed += batch
+                notes.append(f"IDs {batch[0]}…{batch[-1]}: {exc}"[:300])
+            done += len(batch)
+            if progress:
+                progress(done, len(ids))
+    order = {i: n for n, i in enumerate(ids)}
+    pairs.sort(key=lambda pair: order[pair[0]])
+    found = {i for i, _ in pairs}
+    missing = len(ids) - len(found) - len(failed)
+    if missing > 0:
+        notes.append(f"{missing:,} IDs returned no record")
+    log.info("[feeds] looked up %d/%d IDs with %s %s", len(found), len(ids), origin(url), feed_id)
+    return [(i, _flatten_json(r)) for i, r in pairs], notes
 
 
 def _sitemap_entries(url: str) -> tuple[list[str], list[str]]:

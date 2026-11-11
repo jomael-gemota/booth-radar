@@ -57,7 +57,7 @@ def feeds(url: str) -> None:
         print(feed.describe())
     if found:
         started = time.monotonic()
-        records = site_feeds.read_feed(url, found[0].id)
+        records, _ = site_feeds.read_feed(url, found[0].id)
         print(f"\n[test] {found[0].id}: {len(records)} records in {time.monotonic() - started:.1f}s; first:")
         print(json.dumps(records[:1], indent=2, ensure_ascii=False))
 
@@ -68,11 +68,14 @@ def capture(url: str, scroll: bool) -> None:
     print(f"[test] {len(found)} JSON record endpoints in {time.monotonic() - started:.1f}s")
     for feed in found:
         print(feed.describe())
-    if found:
+    lists = [f for f in found if f.lookup is None]
+    if lists:
         started = time.monotonic()
-        records = site_feeds.read_feed(url, found[0].id)
-        print(f"\n[test] {found[0].id}: {len(records)} records in {time.monotonic() - started:.1f}s; first:")
+        records, notes = site_feeds.read_feed(url, lists[0].id)
+        print(f"\n[test] {lists[0].id}: {len(records)} records in {time.monotonic() - started:.1f}s; first:")
         print(json.dumps(records[:1], indent=2, ensure_ascii=False))
+        for note in notes:
+            print(f"[test] note: {note}")
 
 
 def chat() -> None:
