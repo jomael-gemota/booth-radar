@@ -162,8 +162,11 @@ chatRouter.get('/stream/:turnId', (req: Request, res: Response) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  if (!subscribe(req.params.turnId, res)) {
-    res.write(`event: error\ndata: ${JSON.stringify({ message: 'This request has expired.' })}\n\n`);
+  // A reconnecting browser passes the last event id it received (query or Last-Event-ID).
+  const after = Number(req.query.after ?? req.header('Last-Event-ID') ?? 0) || 0;
+  if (!subscribe(req.params.turnId, res, after)) {
+    // The turn finished (or the server restarted) while nobody was listening.
+    res.write(`event: expired\ndata: ${JSON.stringify({ message: 'This request has expired.' })}\n\n`);
     res.end();
     return;
   }
