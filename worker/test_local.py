@@ -8,6 +8,7 @@ Usage:
     python test_local.py --feeds https://example.com       # list data feeds, read the first
     python test_local.py --capture https://example.com/search [--scroll]
                                                            # record a page's JSON APIs, read the first
+    python test_local.py --skills                          # check the Hermes skill files
     python test_local.py --chat                            # chat with the agent in the terminal
     python test_local.py --probe-api                       # probe Hermes API for thinking format
     python test_local.py --probe-server                    # discover all server endpoints + params
@@ -352,11 +353,30 @@ def probe_raw(message: str | None = None) -> None:
         print(f"  No custom event types. Thinking is not exposed at the SSE level.")
 
 
+def check_skills() -> None:
+    import skills
+    from agent import _TOOL_DOCS
+
+    tools = {doc[0] for doc in _TOOL_DOCS}
+    found = skills.load()
+    failed = False
+    for skill in found:
+        issues = skills.problems(skill, tools)
+        failed = failed or bool(issues)
+        status = "FAIL " + "; ".join(issues) if issues else "ok"
+        print(f"[test] {skill.path.parent.name}: {status} ({len(skill.body):,} chars)")
+    if not found:
+        print(f"[test] no skills found in {skills.SKILLS_DIR}")
+    sys.exit(1 if failed or not found else 0)
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
-    if sys.argv[1] == "--chat":
+    if sys.argv[1] == "--skills":
+        check_skills()
+    elif sys.argv[1] == "--chat":
         chat()
     elif sys.argv[1] == "--probe-api":
         probe_api()

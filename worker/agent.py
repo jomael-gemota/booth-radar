@@ -24,6 +24,7 @@ import jobs
 import page_cache
 import recipes
 import site_feeds
+import skills
 import tool_bridge
 from extractor import chat_stream, extract, quick_completion
 from results_table import ResultsTable
@@ -69,8 +70,10 @@ class TurnCancelled(Exception):
 TOOL_OPEN = "<tool>"
 _TOOL_RE = re.compile(r"<tool>\s*(.*?)\s*(?:</tool>|$)", re.DOTALL)
 # Hermes progress lines not shown: Booth Radar's own tools (they emit clearer status
-# lines) and Hermes' internal tool lookups.
-_HIDDEN_PROGRESS_RE = re.compile(r"\b(?:mcp_+booth[_-]radar_+\w+|tool_search|tool_describe)\b", re.IGNORECASE)
+# lines), Hermes' internal tool lookups and skill loading.
+_HIDDEN_PROGRESS_RE = re.compile(
+    r"\b(?:mcp_+booth[_-]radar_+\w+|tool_search|tool_describe|skills_list|skill_view)\b", re.IGNORECASE,
+)
 
 _PERSONA = """\
 You are Booth Radar, a friendly assistant that helps the team collect data from
@@ -303,44 +306,44 @@ terminal or code tool. Pass turn="{turn_id}" on EVERY booth-radar call.
 """
 
 
-_GUIDELINES = """
+def _skill_list() -> str:
+    return "\n".join(f"- {s.name}: {s.description}" for s in skills.load())
+
+
+# mcp mode: Hermes loads the full strategy from the booth-radar skills.
+_MCP_STRATEGY = f"""
 ────────────────────────────────────────────────────────────
 How to scrape fast
 ────────────────────────────────────────────────────────────
-1. New site: ALWAYS call find_feeds first. If a feed holds the items the user
-   wants, read_feed collects all of them in seconds. Do not extract listing
-   pages or read the sitemap to collect items or URLs a feed already gives.
-2. No feed, and the items are listed on a search, category or "load more"
-   page: call capture_api on that page and read_feed the api feed it finds.
-3. Need details the feed lacks (or nothing above worked): get the item URLs
-   from the feed rows, map_site, or a listing page, then extract them in
-   batches. Pages with the same layout are read faster after the first one.
-   More than {job_min} pages: use start_job instead (url_column for URLs already
-   in the table, sitemap for sitemap pages), tell the user it runs in the
-   background, and end your reply.
-4. Data that only appears after clicking a tab, choosing a filter, searching
-   or scrolling: navigate to the page, use click / fill / select /
-   scroll_until_end, then extract with the session, or paginate through
-   "Next" pages. Prefer page URLs (e.g. ?page=2) with extract when they exist.
-5. Only use fetch_page to understand a site's layout or answer a question.
+1. New site: find_feeds first; read_feed when a feed has the items.
+2. No feed: capture_api on a listing or search page, then read_feed its api feed.
+3. Otherwise get the page URLs (feed rows, map_site, listing pages) and
+   extract them; for more than {jobs.JOB_MIN_URLS} pages use start_job and end your reply.
+4. Data behind clicks, filters, search forms or scrolling: navigate and the
+   interaction tools.
+5. fetch_page only to understand a layout or answer a question.
 
-Fields: take them from the user's request as short, human-readable column
-names ("Product Name", "Style Number", "Height", "Price", "URL"). Include "URL"
-when rows come from different pages. Keep the same names when adding more
-details to the same rows later, so they merge into one table. Use key_fields to
-say which columns identify a row (e.g. ["URL"] or ["Style Number"]).
+Before working on a website, load the matching skill with skill_view —
+always site-scraping, plus any other that fits:
+{_skill_list()}
+"""
 
-Pages, feeds and sitemaps loaded in the last hour are cached and return
-instantly. To answer follow-up questions, call the tool again instead of
-guessing. Only set refresh to true when the user asks for fresh data.
+# inline mode: Hermes can't call skill_view, so the skills are part of the prompt.
+_INLINE_STRATEGY = "".join(
+    f"""
+────────────────────────────────────────────────────────────
+Skill: {s.name} — {s.description}
+────────────────────────────────────────────────────────────
+{s.body}
+"""
+    for s in skills.load()
+)
 
+_GUIDELINES = """
 ────────────────────────────────────────────────────────────
 Guidelines
 ────────────────────────────────────────────────────────────
 - If the user just chats or asks a question, answer directly without tools.
-- When a list is split across pages (letters, page numbers, categories),
-  build the full list of URLs and extract all of them, unless the user asked
-  for only some.
 - Never invent data. Only report what the tools returned.
 - When finished, summarise what was collected: which site, how many rows,
   which columns, and any pages that failed.
@@ -349,14 +352,14 @@ Guidelines
 - Never mention file paths, folders, the server, your tools, or which actions
   were or weren't available. Speak only about the results and the user's request.
 - Keep replies concise — conversational does not mean verbose.
-""".replace("{job_min}", str(jobs.JOB_MIN_URLS))
+"""
 
-SYSTEM_PROMPT = _PERSONA + _INLINE_TOOLS + _GUIDELINES
+SYSTEM_PROMPT = _PERSONA + _INLINE_TOOLS + _INLINE_STRATEGY + _GUIDELINES
 
 
 def _system_prompt(turn_id: str) -> str:
     if AGENT_TOOL_MODE == "mcp":
-        return _PERSONA + _mcp_tools(turn_id) + _GUIDELINES
+        return _PERSONA + _mcp_tools(turn_id) + _MCP_STRATEGY + _GUIDELINES
     return SYSTEM_PROMPT
 
 
