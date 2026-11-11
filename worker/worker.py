@@ -2,9 +2,12 @@
 worker.py  –  Booth Radar Python worker.
 
 Connects to the Express server over WebSocket and runs chat turns:
-  1. Receives { type: "chat", turnId, conversationId, messages, results }
+  1. Receives { type: "chat", turnId, conversationId, messages, results, job }
   2. Runs the Booth Radar agent (Hermes + scraping tools)
   3. Sends token / status / results / file / done / error frames back to the server
+
+Background jobs (jobs.py) run outside turns: the server sends job_run / job_pause /
+job_cancel, and the worker answers with job_created / job_progress / job_finished.
 
 The server persists the conversation and relays frames to the browser via SSE.
 """
@@ -26,6 +29,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 import artifacts
+import jobs
 import tool_bridge
 from agent import AGENT_TOOL_MODE, TurnCancelled, run_turn
 from extractor import EXTRACT_MODEL
@@ -56,6 +60,7 @@ async def handle_chat(
     conversation_id: str | None,
     messages: list[dict[str, str]],
     results: list[dict[str, str]],
+    job: dict[str, Any] | None,
 ) -> None:
     loop = asyncio.get_running_loop()
 
@@ -84,7 +89,7 @@ async def handle_chat(
     try:
         reply, new_results = await loop.run_in_executor(
             None, run_turn, messages, results, emit,
-            str(out_dir) if out_dir else None, cancel_event, turn_id,
+            str(out_dir) if out_dir else None, cancel_event, turn_id, conversation_id, job,
         )
     except TurnCancelled:
         # Server already broadcast 'cancelled' to SSE clients — nothing more to send
@@ -118,6 +123,23 @@ async def _sender(ws, outbox: asyncio.Queue[dict[str, Any]]) -> None:
         await ws.send(json.dumps(msg))
 
 
+def _job_sender(loop: asyncio.AbstractEventLoop, outbox: asyncio.Queue[dict[str, Any]]) -> jobs.Send:
+    # Job threads send frames on the current connection; frames sent while
+    # disconnected are dropped, and the server resends job_run on reconnect.
+    def send(frame: dict[str, Any]) -> None:
+        loop.call_soon_threadsafe(outbox.put_nowait, frame)
+    return send
+
+
+def _handle_job_message(msg_type: str, msg: dict[str, Any]) -> None:
+    if msg_type == "job_run":
+        jobs.run(msg.get("job") or {}, int(msg.get("cursor") or 0), msg.get("results") or [])
+    elif msg_type == "job_pause":
+        jobs.pause(str(msg.get("jobId") or ""))
+    elif msg_type == "job_cancel":
+        jobs.cancel(str(msg.get("jobId") or ""))
+
+
 # ── WebSocket loop ─────────────────────────────────────────────────────────
 
 async def run() -> None:
@@ -128,6 +150,7 @@ async def run() -> None:
                 log.info("[worker] connected")
                 outbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
                 sender = asyncio.create_task(_sender(ws, outbox))
+                jobs.set_sender(_job_sender(asyncio.get_running_loop(), outbox))
 
                 try:
                     async for raw in ws:
@@ -149,6 +172,10 @@ async def run() -> None:
                                 log.debug("[worker] cancel for unknown/finished turn %s", turn_id)
                             continue
 
+                        if msg_type in ("job_run", "job_pause", "job_cancel"):
+                            await asyncio.get_running_loop().run_in_executor(None, _handle_job_message, msg_type, msg)
+                            continue
+
                         if msg_type != "chat":
                             log.warning("[worker] unknown message type: %s", msg_type)
                             continue
@@ -162,11 +189,12 @@ async def run() -> None:
                         conversation_id = msg.get("conversationId")
                         log.info("[worker] received chat turn %s (%d messages)", turn_id, len(messages))
                         task = asyncio.create_task(
-                            handle_chat(outbox, turn_id, conversation_id, messages, results)
+                            handle_chat(outbox, turn_id, conversation_id, messages, results, msg.get("job"))
                         )
                         _running.add(task)
                         task.add_done_callback(_running.discard)
                 finally:
+                    jobs.set_sender(lambda frame: None)
                     sender.cancel()
 
         except ConnectionClosed as exc:

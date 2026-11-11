@@ -20,6 +20,7 @@ from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
+import jobs
 import page_cache
 import recipes
 import site_feeds
@@ -59,6 +60,7 @@ _URL_FIELDS = {"url", "link", "page url", "product url", "source url"}
 
 Emit = Callable[[str, dict[str, Any]], None]
 Row = dict[str, str]
+CallTool = Callable[[str, dict[str, Any], Emit], str]
 
 
 class TurnCancelled(Exception):
@@ -228,6 +230,26 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
         "table. Use it for pagination that has no page URLs to extract directly.",
     ),
     (
+        "start_job",
+        '{"fields": ["Product Name", "Price", "URL"], "urls": [], "url_column": "", '
+        '"sitemap": "", "include": "", "instructions": "", "key_fields": [], "replace": false}',
+        'start_job(fields, urls=[], url_column="", sitemap="", include="", instructions="", '
+        "key_fields=[], replace=false)",
+        "Extracts many pages in the background, outside this reply, filling the results\n"
+        "table as it goes; returns at once. Give exactly one URL source: `urls`;\n"
+        "`url_column` (a results column holding page URLs, e.g. \"URL\" from a feed, to\n"
+        "fill in details from each page); or `sitemap` (a site URL) with `include`\n"
+        f"(like map_site). Up to {jobs.MAX_JOB_URLS:,} pages. Use it instead of extract when more\n"
+        f"than {jobs.JOB_MIN_URLS} pages need extracting. One job per conversation.",
+    ),
+    (
+        "cancel_job",
+        "{}",
+        "cancel_job()",
+        "Stops the conversation's background job (only when the user asks). Rows\n"
+        "collected so far stay.",
+    ),
+    (
         "extract_booths",
         '{"urls": ["https://...", ...], "refresh": false}',
         "extract_booths(urls, refresh=false)",
@@ -293,6 +315,9 @@ How to scrape fast
 3. Need details the feed lacks (or nothing above worked): get the item URLs
    from the feed rows, map_site, or a listing page, then extract them in
    batches. Pages with the same layout are read faster after the first one.
+   More than {job_min} pages: use start_job instead (url_column for URLs already
+   in the table, sitemap for sitemap pages), tell the user it runs in the
+   background, and end your reply.
 4. Data that only appears after clicking a tab, choosing a filter, searching
    or scrolling: navigate to the page, use click / fill / select /
    scroll_until_end, then extract with the session, or paginate through
@@ -324,7 +349,7 @@ Guidelines
 - Never mention file paths, folders, the server, your tools, or which actions
   were or weren't available. Speak only about the results and the user's request.
 - Keep replies concise — conversational does not mean verbose.
-"""
+""".replace("{job_min}", str(jobs.JOB_MIN_URLS))
 
 SYSTEM_PROMPT = _PERSONA + _INLINE_TOOLS + _GUIDELINES
 
@@ -523,8 +548,12 @@ def _collect(
     table: ResultsTable,
     emit: Emit,
     verb: str,
+    failed: list[tuple[str, str]] | None = None,
 ) -> list[str]:
-    """Run *work* for each label in parallel and merge rows into *table* in label order."""
+    """
+    Run *work* for each label in parallel and merge rows into *table* in label order.
+    Labels that fail are also added to *failed* as (label, error).
+    """
     lines: list[str] = []
     outcomes: dict[int, list[Row] | Exception] = {}
     next_to_merge = 0
@@ -538,6 +567,8 @@ def _collect(
             next_to_merge += 1
             if isinstance(outcome, Exception):
                 lines.append(f"- {label}: FAILED ({outcome})")
+                if failed is not None:
+                    failed.append((label, str(outcome)))
                 continue
             added, updated = table.add(outcome)
             changed = changed or bool(added or updated)
@@ -584,14 +615,39 @@ def _tool_extract(
         return _extract_session(session, fields, str(args.get("instructions") or ""), table, emit, sessions)
     skipped = urls[MAX_URLS_PER_CALL:]
     urls = urls[:MAX_URLS_PER_CALL]
-    refresh = _flag(args, "refresh")
-    instructions = str(args.get("instructions") or "")
+    emit("status", {"text": f"📄 Extracting {len(urls)} page{'s' if len(urls) != 1 else ''}…"})
+    lines = _extract_urls(
+        urls, None if booths else fields, str(args.get("instructions") or ""), _flag(args, "refresh"),
+        table, emit, max(SCRAPE_CONCURRENCY, EXTRACT_CONCURRENCY),
+    )
+    if skipped:
+        lines.append(
+            f"Not processed (over the {MAX_URLS_PER_CALL}-URL limit): {len(skipped)} URLs. "
+            f"For more than {jobs.JOB_MIN_URLS} pages use start_job instead of more extract calls."
+        )
+    lines.append(_table_summary(table))
+    return "\n".join(lines)
+
+
+def _extract_urls(
+    urls: list[str],
+    fields: list[str] | None,
+    instructions: str,
+    refresh: bool,
+    table: ResultsTable,
+    emit: Emit,
+    workers: int,
+    url_field: str = "",
+    failed: list[tuple[str, str]] | None = None,
+) -> list[str]:
+    """Extract *fields* (None = booth rows) from each URL into *table*; one line per URL."""
     # Booth rows are normalised by the booth prompt, so a recipe could never reproduce them.
-    layouts = _PageRecipes(urls, fields, refresh) if recipes.RECIPES_ENABLED and not booths else None
+    layouts = _PageRecipes(urls, fields, refresh) if recipes.RECIPES_ENABLED and fields else None
+    columns = fields or list(BOOTH_FIELDS)
 
     def work(i: int) -> list[Row]:
         url = urls[i]
-        if booths:
+        if fields is None:
             return _model_rows(url, refresh, None, "")[0]
         def load(recipe: dict[str, Any]) -> str:
             return load_markup(url, refresh, browser=bool(recipe.get("browser")), wait_for=recipe.get("item"))[1]
@@ -601,9 +657,12 @@ def _tool_extract(
             rows, browser = _model_rows(url, refresh, fields, instructions)
             if layouts:
                 layouts.learn(i, url, rows, browser, lambda: load_markup(url, browser=browser)[1])
-        return _fill_urls(rows, fields, url)
+        rows = _fill_urls(rows, columns, url)
+        if url_field:
+            for row in rows:
+                row[url_field] = url
+        return rows
 
-    emit("status", {"text": f"📄 Extracting {len(urls)} page{'s' if len(urls) != 1 else ''}…"})
     leaders = layouts.leaders() if layouts else []
     rest = [i for i in range(len(urls)) if i not in leaders]
     lines: list[str] = []
@@ -611,15 +670,87 @@ def _tool_extract(
         if group:
             lines += _collect(
                 [urls[i] for i in group], lambda j, g=group: work(g[j]),
-                max(SCRAPE_CONCURRENCY, EXTRACT_CONCURRENCY), table, emit, "Extracted",
+                workers, table, emit, "Extracted", failed,
             )
     if layouts and layouts.uses:
         recipes.record_uses(layouts.uses)
         lines.append(f"{sum(layouts.uses.values())} pages were read with a learned page layout (no AI call).")
-    if skipped:
-        lines.append(f"Not processed (over the {MAX_URLS_PER_CALL}-URL limit): {len(skipped)} URLs")
-    lines.append(_table_summary(table))
-    return "\n".join(lines)
+    return lines
+
+
+def _job_batch(urls: list[str], job: jobs.Job, table: ResultsTable) -> list[tuple[str, str]]:
+    failed: list[tuple[str, str]] = []
+    _extract_urls(
+        urls, job.fields, job.instructions, False, table, lambda _t, _p: None,
+        jobs.JOB_PAGE_CONCURRENCY, job.url_field, failed,
+    )
+    return failed
+
+
+jobs.set_extractor(_job_batch)
+
+
+def _tool_start_job(args: dict[str, Any], table: ResultsTable, emit: Emit) -> str:
+    if not table.conversation_id:
+        return "Error: background jobs need a saved conversation."
+    if table.job_lock:
+        return "Error: this conversation already has a background job. Wait for it, or cancel it first."
+    fields = _str_list(args.get("fields"))
+    if not fields:
+        return "Error: 'fields' is required, e.g. [\"Product Name\", \"Price\"]."
+    url_column = str(args.get("url_column") or "").strip()
+    sitemap = str(args.get("sitemap") or "").strip()
+    sources = [bool(_str_list(args.get("urls"))), bool(url_column), bool(sitemap)]
+    if sum(sources) != 1:
+        return "Error: give exactly one URL source: 'urls', 'url_column' or 'sitemap'."
+
+    key_fields = _str_list(args.get("key_fields"))
+    url_field = ""
+    if url_column:
+        url_field = next((c for c in table.columns if c.casefold() == url_column.casefold()), "")
+        if not url_field:
+            return f"Error: the results table has no column {url_column!r}; columns are {table.columns}."
+        urls = [row[url_field] for row in table.snapshot()]
+        fields = fields if url_field in fields else [url_field, *fields]
+        key_fields = key_fields or [url_field]
+    elif sitemap:
+        emit("status", {"text": f"🗺️ Reading the sitemap of {site_feeds.origin(sitemap)}"})
+        urls, _ = site_feeds.map_site(sitemap, str(args.get("include") or ""), jobs.MAX_JOB_URLS, False)
+    else:
+        urls = _str_list(args.get("urls"))
+    urls = list(dict.fromkeys(u for u in urls if u.startswith(("http://", "https://"))))
+    skipped = max(0, len(urls) - jobs.MAX_JOB_URLS)
+    urls = urls[:jobs.MAX_JOB_URLS]
+    if not urls:
+        return "Error: no page URLs found for the job."
+
+    error = table.prepare(fields, key_fields or None, _flag(args, "replace"))
+    if error:
+        return error
+    jobs.create(table, fields, table.key_fields, str(args.get("instructions") or ""), urls, url_field)
+    emit("status", {"text": f"🚀 Started a background job for {len(urls):,} pages"})
+    _emit_results(table, emit)
+    minutes = max(1, round(len(urls) * 1.5 / jobs.JOB_PAGE_CONCURRENCY / 60))
+    capped = f" ({skipped:,} more URLs were over the {jobs.MAX_JOB_URLS:,}-page limit)" if skipped else ""
+    return (
+        f"Background job started for {len(urls):,} pages{capped}, roughly {minutes} minute{'s' if minutes != 1 else ''}. "
+        "Rows keep appearing in the results table, and the user can pause or cancel the job "
+        "from the chat. Tell the user, then end your reply: don't wait for the job or "
+        "extract these pages yourself."
+    )
+
+
+def _tool_cancel_job(table: ResultsTable, emit: Emit, job: dict[str, Any] | None) -> str:
+    live = jobs.active(table.conversation_id) if table.conversation_id else None
+    if live and jobs.cancel(live.job_id):
+        emit("status", {"text": "🛑 Cancelling the background job"})
+        return "The background job stops after the pages it is reading now. Rows collected so far stay."
+    if job and job.get("status") == "paused":
+        jobs.finish_paused(str(job.get("jobId")))
+        table.job_lock = ""
+        emit("status", {"text": "🛑 Cancelled the paused background job"})
+        return "The paused background job was cancelled. Rows collected so far stay."
+    return "There is no background job running in this conversation."
 
 
 def _tool_find_feeds(args: dict[str, Any], emit: Emit) -> str:
@@ -917,7 +1048,14 @@ def _tool_map_site(args: dict[str, Any], emit: Emit) -> str:
 _SESSION_TOOLS = {"navigate", "snapshot", "click", "fill", "select", "scroll_until_end"}
 
 
-def _run_tool(name: str, args: dict[str, Any], table: ResultsTable, emit: Emit, sessions: TurnSessions) -> str:
+def _run_tool(
+    name: str,
+    args: dict[str, Any],
+    table: ResultsTable,
+    emit: Emit,
+    sessions: TurnSessions,
+    job: dict[str, Any] | None = None,
+) -> str:
     if name in _SESSION_TOOLS or name == "paginate":
         try:
             if name == "paginate":
@@ -939,8 +1077,14 @@ def _run_tool(name: str, args: dict[str, Any], table: ResultsTable, emit: Emit, 
         return _tool_extract(args, table, emit, sessions)
     if name == "extract_booths":
         return _tool_extract(args, table, emit, booths=True)
+    if name == "start_job":
+        return _tool_start_job(args, table, emit)
+    if name == "cancel_job":
+        return _tool_cancel_job(table, emit, job)
     if name == "clear_results":
-        table.clear()
+        error = table.clear()
+        if error:
+            return error
         emit("status", {"text": "🧹 Cleared the results table"})
         _emit_results(table, emit)
         return "Results table cleared (0 rows)."
@@ -981,6 +1125,10 @@ def _preamble_for(name: str, args: dict[str, Any]) -> str:
         if count > 1:
             return f"Great, I'll collect {what} from {count} pages now — this may take a moment! 📄"
         return f"Great, I'll collect {what} from that page now 📄"
+    if name == "start_job":
+        return "That's a lot of pages, so I'll collect them in the background — rows will keep appearing in your table 🚀"
+    if name == "cancel_job":
+        return "Sure! I'll stop the background job — everything collected so far stays in the table 🛑"
     if name == "clear_results":
         return "Sure! I'll clear the results table so we can start fresh 🧹"
     return "Give me a moment while I work on that 🔍"
@@ -1039,6 +1187,39 @@ class _Acknowledgement:
 
 # ── Turn ───────────────────────────────────────────────────────────────────
 
+ACTIVE_JOB_STATUSES = {"queued", "running", "paused"}
+JOB_CONTEXT_FAILED  = 50
+
+
+def _job_prompt(table: ResultsTable, job: dict[str, Any] | None) -> str:
+    """The conversation's latest background job, with live progress when it runs here."""
+    if not job:
+        return ""
+    status = str(job.get("status") or "")
+    total = len(job.get("urls") or []) or int(job.get("total") or 0)
+    cursor = int(job.get("cursor") or 0)
+    failed = int(job.get("failedCount") or 0)
+    live = jobs.active(table.conversation_id) if table.conversation_id else None
+    if live and live.job_id == job.get("jobId"):
+        status, cursor, failed = live.status, live.cursor, live.failed_count
+    columns = ", ".join(job.get("fields") or [])
+    failures = f", {failed:,} failed" if failed else ""
+    if status in ACTIVE_JOB_STATUSES:
+        state = "is paused" if status == "paused" else "is running"
+        return (
+            f"\n\nA background job {state} in this conversation, collecting {columns}: "
+            f"{cursor:,} of {total:,} pages done{failures}, {len(table):,} rows in the table so far. "
+            "The user can pause, resume or cancel it from the chat; call cancel_job only if "
+            "they ask you to stop it."
+        )
+    urls = [f"- {f.get('url')}" for f in (job.get("failed") or [])[:JOB_CONTEXT_FAILED]]
+    failed_list = ("\nPages it could not read:\n" + "\n".join(urls)) if urls else ""
+    return (
+        f"\n\nThe last background job in this conversation ({status}) collected {columns} "
+        f"from {cursor:,} of {total:,} pages{failures}.{failed_list}"
+    )
+
+
 def _context_prompt(table: ResultsTable) -> str:
     if not table.rows:
         return "The results table is currently empty."
@@ -1069,7 +1250,7 @@ def _run_mcp_turn(
     emit: Emit,
     ack: _Acknowledgement,
     cancel: threading.Event | None,
-    sessions: TurnSessions,
+    call_tool: CallTool,
 ) -> tuple[str, list[Row]]:
     """One Hermes request; Hermes runs the tools itself via the MCP server and bridge."""
     emit_lock = threading.Lock()
@@ -1109,7 +1290,7 @@ def _run_mcp_turn(
         args = {k: v for k, v in args.items() if k != "turn"}
         speak_first(_preamble_for(name, args))
         try:
-            return _run_tool(name, args, table, safe_emit, sessions)
+            return call_tool(name, args, safe_emit)
         except Exception as exc:
             safe_emit("status", {"text": f"⚠️ {name} failed: {exc}"})
             raise
@@ -1142,26 +1323,44 @@ def run_turn(
     output_dir: str | None = None,
     cancel: threading.Event | None = None,
     turn_id: str | None = None,
+    conversation_id: str | None = None,
+    job: dict[str, Any] | None = None,
 ) -> tuple[str, list[Row]]:
     """
     Run one assistant turn over *history* (user/assistant messages, last one
     from the user). Returns (reply_text, updated_results).
 
+    While the conversation has a background job, the turn shares the job's live
+    results table instead of *results*. *job* is the server's record of the
+    conversation's latest job.
+
     Raises TurnCancelled if *cancel* is set before or between steps.
     """
     turn_id = turn_id or uuid.uuid4().hex
-    table = ResultsTable(results)
-    system = f"{_system_prompt(turn_id)}{_output_prompt(output_dir)}\n\n{_context_prompt(table)}"
+    conversation_id = conversation_id or ""
+    table = jobs.table_for(conversation_id) if conversation_id else None
+    if table is None:
+        table = ResultsTable(results, conversation_id)
+        if job and job.get("status") in ACTIVE_JOB_STATUSES:
+            table.job_lock = jobs.LOCK_REASON
+    system = (
+        f"{_system_prompt(turn_id)}{_output_prompt(output_dir)}\n\n"
+        f"{_context_prompt(table)}{_job_prompt(table, job)}"
+    )
     convo: list[dict[str, str]] = [
         {"role": "system", "content": system},
         *({"role": m["role"], "content": m["content"]} for m in history),
     ]
     ack = _Acknowledgement(history)
     sessions = TurnSessions()
+
+    def call_tool(name: str, args: dict[str, Any], tool_emit: Emit) -> str:
+        return _run_tool(name, args, table, tool_emit, sessions, job)
+
     try:
         if AGENT_TOOL_MODE == "mcp":
-            return _run_mcp_turn(turn_id, convo, table, emit, ack, cancel, sessions)
-        return _run_inline_turn(convo, table, emit, ack, cancel, sessions)
+            return _run_mcp_turn(turn_id, convo, table, emit, ack, cancel, call_tool)
+        return _run_inline_turn(convo, table, emit, ack, cancel, call_tool)
     finally:
         sessions.close()
 
@@ -1172,7 +1371,7 @@ def _run_inline_turn(
     emit: Emit,
     ack: _Acknowledgement,
     cancel: threading.Event | None,
-    sessions: TurnSessions,
+    call_tool: CallTool,
 ) -> tuple[str, list[Row]]:
     """Hermes calls tools with <tool> blocks parsed here; one Hermes request per step."""
     reply_parts: list[str] = []
@@ -1251,7 +1450,7 @@ def _run_inline_turn(
         if call_ok:
             log.info("[agent] step %d tool=%s args=%s", step + 1, name, args)
             try:
-                observation = _run_tool(name, args, table, emit, sessions)
+                observation = call_tool(name, args, emit)
             except TurnCancelled:
                 raise
             except Exception as exc:

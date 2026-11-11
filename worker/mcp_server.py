@@ -147,6 +147,37 @@ async def extract(
 
 
 @server.tool(structured_output=False)
+async def start_job(
+    fields: list[str],
+    turn: str = "",
+    urls: list[str] | None = None,
+    url_column: str = "",
+    sitemap: str = "",
+    include: str = "",
+    instructions: str = "",
+    key_fields: list[str] | None = None,
+    replace: bool = False,
+) -> str:
+    """
+    Extract many pages in the background, outside this reply, filling the results
+    table as it goes; returns at once. Give exactly one URL source: `urls`,
+    `url_column` (a results column holding page URLs, to fill in details from each
+    page), or `sitemap` (a site URL) with `include`. Use it instead of extract for
+    large page counts.
+    """
+    return await _call(
+        "start_job", turn, fields=fields, urls=urls or [], url_column=url_column, sitemap=sitemap,
+        include=include, instructions=instructions, key_fields=key_fields or [], replace=replace,
+    )
+
+
+@server.tool(structured_output=False)
+async def cancel_job(turn: str = "") -> str:
+    """Stop the conversation's background job (only when the user asks); collected rows stay."""
+    return await _call("cancel_job", turn)
+
+
+@server.tool(structured_output=False)
 async def navigate(url: str, turn: str = "", session: str = "") -> str:
     """
     Open a page in a browser session you can interact with (new session if none is
