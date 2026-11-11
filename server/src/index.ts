@@ -11,6 +11,8 @@ import fs from 'fs';
 import { connectDb } from './db.js';
 import { attachWorker, isWorkerConnected } from './relay.js';
 import { chatRouter } from './routes/chat.js';
+import { jobsRouter } from './routes/jobs.js';
+import { ensureJobIndexes } from './jobs.js';
 import { greetingRouter } from './routes/greeting.js';
 import { authRouter } from './routes/auth.js';
 import { accountRouter } from './routes/account.js';
@@ -23,6 +25,7 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 
 async function main() {
   await connectDb();
+  await ensureJobIndexes();
 
   const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017';
 
@@ -72,6 +75,7 @@ async function main() {
   app.use('/api', accountRouter);
   app.use('/api', adminRouter);
   app.use('/api', chatRouter);
+  app.use('/api', jobsRouter);
   app.use('/api', greetingRouter);
 
   app.get('/api/health', (_req, res) => {

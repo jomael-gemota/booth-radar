@@ -12,6 +12,7 @@ import {
   type ConversationDoc,
   type ResultRow,
 } from '../relay.js';
+import { contextFor, latestJob } from '../jobs.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 
 export const chatRouter = Router();
@@ -126,8 +127,10 @@ chatRouter.post('/chat', async (req: Request, res: Response) => {
     .slice(-HISTORY_WINDOW)
     .map(({ role, content }) => ({ role, content }));
 
+  const job = await latestJob(convo._id);
+
   try {
-    startTurn(turnId, convo._id, history, convo.results);
+    startTurn(turnId, convo._id, history, convo.results, job ? contextFor(job) : null);
   } catch {
     res.status(503).json({ error: 'The Booth Radar worker is offline. Please try again once it reconnects.' });
     return;
