@@ -6,7 +6,7 @@ site_feeds.py  –  Read a site's public data feeds and sitemaps instead of rend
   * read_feed(url, feed)   – every record of one feed, flattened to plain fields
   * map_site(url, include) – page URLs listed in the site's sitemaps
 
-All requests honour robots.txt for the BoothRadar user agent.
+All requests honour robots.txt for the BoothRadar user agent and only reach public hosts.
 """
 
 from __future__ import annotations
@@ -19,23 +19,21 @@ import logging
 import math
 import os
 import re
-import threading
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
-from urllib import robotparser
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
+import net_guard
 import page_cache
 import scraper
 
 log = logging.getLogger(__name__)
 
-USER_AGENT       = "Mozilla/5.0 (compatible; BoothRadar/1.0)"
-ROBOTS_AGENT     = "BoothRadar"
+USER_AGENT       = net_guard.ROBOTS_UA
 FEED_TIMEOUT     = 20
 FEED_CONCURRENCY = 4
 MAX_FEED_RECORDS = int(os.getenv("MAX_FEED_RECORDS", "2000"))
@@ -95,45 +93,14 @@ class _Paging:
     as_string: bool
 
 
-# ── HTTP + robots.txt ──────────────────────────────────────────────────────
+# ── HTTP ───────────────────────────────────────────────────────────────────
 
-_robots: dict[str, robotparser.RobotFileParser | None] = {}
-_robots_lock = threading.Lock()
-
-
-def origin(url: str) -> str:
-    parts = urlsplit(url.strip())
-    if parts.scheme not in ("http", "https") or not parts.netloc:
-        raise ValueError(f"Invalid URL: {url!r}")
-    return f"{parts.scheme}://{parts.netloc}"
-
-
-def _robots_for(site: str) -> robotparser.RobotFileParser | None:
-    with _robots_lock:
-        if site in _robots:
-            return _robots[site]
-    parser: robotparser.RobotFileParser | None = None
-    try:
-        resp = requests.get(f"{site}/robots.txt", headers={"User-Agent": USER_AGENT}, timeout=FEED_TIMEOUT)
-        if resp.status_code == 200:
-            parser = robotparser.RobotFileParser()
-            parser.parse(resp.text.splitlines())
-    except requests.RequestException as exc:
-        log.info("[feeds] robots.txt unavailable for %s: %s", site, exc)
-    with _robots_lock:
-        _robots[site] = parser
-    return parser
-
-
-def _check_robots(url: str) -> None:
-    parser = _robots_for(origin(url))
-    if parser is not None and not parser.can_fetch(ROBOTS_AGENT, url):
-        raise PermissionError(f"robots.txt does not allow {url}")
+origin = net_guard.origin
 
 
 def _get(url: str, **params: Any) -> requests.Response:
-    _check_robots(url)
-    return requests.get(
+    return net_guard.request(
+        "GET",
         url,
         params=params or None,
         headers={"User-Agent": USER_AGENT, "Accept": "application/json, application/xml, */*"},
@@ -450,13 +417,12 @@ def _signature(request: dict[str, Any], paging: _Paging | None, path: tuple[str,
 
 def _replay(request: dict[str, Any]) -> Any:
     url = request["url"]
-    _check_robots(url)
     headers = {
         k: v for k, v in (request.get("headers") or {}).items()
         if not k.startswith(":") and k.lower() not in _SKIP_HEADERS
     }
     body = request.get("body")
-    resp = requests.request(
+    resp = net_guard.request(
         request["method"], url, headers=headers,
         data=body.encode("utf-8") if body else None, timeout=FEED_TIMEOUT,
     )
@@ -602,7 +568,7 @@ def _sitemap_entries(url: str) -> tuple[list[str], list[str]]:
 
 
 def _all_sitemap_urls(site: str) -> list[str]:
-    parser = _robots_for(site)
+    parser = net_guard.robots_for(site)
     queue = list((parser.site_maps() if parser else None) or [])
     queue = queue or [f"{site}/sitemap_index.xml", f"{site}/sitemap.xml"]
     seen: set[str] = set()

@@ -26,7 +26,8 @@ import site_feeds
 import tool_bridge
 from extractor import chat_stream, extract, quick_completion
 from results_table import ResultsTable
-from scraper import SCRAPE_CONCURRENCY, load_markup, load_page, scrape, used_browser
+from browser import StaleRef, TurnSessions
+from scraper import SCRAPE_CONCURRENCY, load_markup, load_page, parse_html, scrape, used_browser
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,10 @@ FEED_BATCH_CHARS     = 12000
 FEED_BATCH_RECORDS   = 40
 FEED_VALUE_CHARS     = 600
 MAX_MAP_URLS         = 1000
+MAX_SNAPSHOT_ELEMENTS  = 150
+SNAPSHOT_ELEMENT_CHARS = 6000
+MAX_SCROLL_ROUNDS      = 30
+MAX_PAGINATE_PAGES     = 50
 HISTORY_CONTEXT_ROWS = 200
 HISTORY_ROW_CHARS    = 300
 
@@ -163,12 +168,64 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
     (
         "extract",
         '{"urls": ["https://...", ...], "fields": ["Product Name", "Price"], '
-        '"instructions": "", "key_fields": [], "refresh": false, "replace": false}',
-        'extract(urls, fields, instructions="", key_fields=[], refresh=false, replace=false)',
+        '"instructions": "", "key_fields": [], "refresh": false, "replace": false, "session": ""}',
+        'extract(urls, fields, instructions="", key_fields=[], refresh=false, replace=false, session="")',
         "Scrapes each URL in parallel and extracts one row per matching item with\n"
         "the requested fields into the results table. Use `instructions` to say which\n"
         f"items count or how to read a value. Max {MAX_URLS_PER_CALL} URLs per call;\n"
-        "call it again for more.",
+        "call it again for more. Pass `session` instead of urls to extract from a\n"
+        "browser session's current page (after clicking, filtering or scrolling).",
+    ),
+    (
+        "navigate",
+        '{"url": "https://...", "session": ""}',
+        'navigate(url, session="")',
+        "Opens a page in a browser session you can interact with (a new session if\n"
+        "none is given; ids s1, s2…). Returns a snapshot: the page's clickable\n"
+        "elements with refs (e1, e2…) and its text. Use it when data only appears\n"
+        "after clicking, filtering, searching or scrolling.",
+    ),
+    (
+        "snapshot",
+        '{"session": "s1", "offset": 0}',
+        "snapshot(session, offset=0)",
+        "Re-reads the session's current page (elements and text); pass offset to\n"
+        "read further down long pages.",
+    ),
+    (
+        "click",
+        '{"session": "s1", "ref": "e12"}',
+        "click(session, ref)",
+        "Clicks an element by its ref from the latest snapshot (link, button, tab,\n"
+        "checkbox) and returns the new snapshot.",
+    ),
+    (
+        "fill",
+        '{"session": "s1", "ref": "e3", "text": "...", "submit": false}',
+        "fill(session, ref, text, submit=false)",
+        "Types text into a field; submit=true presses Enter. Returns the new snapshot.",
+    ),
+    (
+        "select",
+        '{"session": "s1", "ref": "e4", "value": "..."}',
+        "select(session, ref, value)",
+        "Chooses a dropdown option by its label or value. Returns the new snapshot.",
+    ),
+    (
+        "scroll_until_end",
+        '{"session": "s1", "max_rounds": 10}',
+        "scroll_until_end(session, max_rounds=10)",
+        "Scrolls down until the page stops loading more (infinite scroll). Then\n"
+        "extract with the session.",
+    ),
+    (
+        "paginate",
+        '{"session": "s1", "next_ref": "e40", "fields": ["Product Name", "Price"], '
+        '"max_pages": 10, "instructions": "", "key_fields": [], "replace": false}',
+        'paginate(session, next_ref, fields, max_pages=10, instructions="", key_fields=[], replace=false)',
+        "Extracts the fields from the session's current page, clicks the \"Next\"\n"
+        "element (next_ref), and repeats up to max_pages pages, filling the results\n"
+        "table. Use it for pagination that has no page URLs to extract directly.",
     ),
     (
         "extract_booths",
@@ -236,7 +293,11 @@ How to scrape fast
 3. Need details the feed lacks (or nothing above worked): get the item URLs
    from the feed rows, map_site, or a listing page, then extract them in
    batches. Pages with the same layout are read faster after the first one.
-4. Only use fetch_page to understand a site's layout or answer a question.
+4. Data that only appears after clicking a tab, choosing a filter, searching
+   or scrolling: navigate to the page, use click / fill / select /
+   scroll_until_end, then extract with the session, or paginate through
+   "Next" pages. Prefer page URLs (e.g. ?page=2) with extract when they exist.
+5. Only use fetch_page to understand a site's layout or answer a question.
 
 Fields: take them from the user's request as short, human-readable column
 names ("Product Name", "Style Number", "Height", "Price", "URL"). Include "URL"
@@ -415,15 +476,15 @@ class _PageRecipes:
         """The first URL of each layout that still needs a recipe; extracted before the rest."""
         return [self.keys.index(k) for k in sorted(self._learn, key=self.keys.index)]
 
-    def read(self, i: int, url: str, refresh: bool) -> list[Row] | None:
+    def read(self, i: int, url: str, load: Callable[[dict[str, Any]], str]) -> list[Row] | None:
+        """Rows read with the layout's recipe from load(recipe)'s HTML; None if the model is needed."""
         key = self.keys[i]
         with self._lock:
             recipe = self._recipes.get(key)
         if recipe is None:
             return None
         try:
-            _, markup = load_markup(url, refresh, browser=bool(recipe.get("browser")))
-            rows = recipes.apply_page(recipe, markup, url, self.fields)
+            rows = recipes.apply_page(recipe, load(recipe), url, self.fields)
         except ValueError as exc:
             log.info("[agent] recipe failed on %s: %s", url, exc)
             rows = []
@@ -437,14 +498,13 @@ class _PageRecipes:
                 recipes.forget(key)
         return None
 
-    def learn(self, i: int, url: str, rows: list[Row], browser: bool) -> None:
+    def learn(self, i: int, url: str, rows: list[Row], browser: bool, markup: Callable[[], str]) -> None:
         key = self.keys[i]
         with self._lock:
             if key not in self._learn or not rows:
                 return
             self._learn.discard(key)
-        _, markup = load_markup(url, browser=browser)
-        recipe = recipes.learn_page(markup, url, self.fields, rows)
+        recipe = recipes.learn_page(markup(), url, self.fields, rows)
         if recipe:
             recipe["browser"] = browser
             recipes.put(key, recipe)
@@ -505,16 +565,23 @@ def _table_summary(table: ResultsTable) -> str:
     return f"Results table now has {len(table)} rows with columns {table.columns}."
 
 
-def _tool_extract(args: dict[str, Any], table: ResultsTable, emit: Emit, booths: bool = False) -> str:
+def _tool_extract(
+    args: dict[str, Any], table: ResultsTable, emit: Emit, sessions: TurnSessions | None = None, booths: bool = False,
+) -> str:
     urls = _str_list(args.get("urls"))
-    if not urls:
-        return "Error: 'urls' must be a non-empty list of URLs."
+    session = str(args.get("session") or "").strip()
+    if not urls and not session:
+        return "Error: 'urls' must be a non-empty list of URLs (or pass a browser session)."
     fields = list(BOOTH_FIELDS) if booths else _str_list(args.get("fields"))
     if not fields:
         return "Error: 'fields' is required, e.g. [\"Product Name\", \"Price\"]."
     error = table.prepare(fields, _str_list(args.get("key_fields")) or None, _flag(args, "replace"))
     if error:
         return error
+    if session and not urls:
+        if sessions is None:
+            return "Error: browser sessions are not available here."
+        return _extract_session(session, fields, str(args.get("instructions") or ""), table, emit, sessions)
     skipped = urls[MAX_URLS_PER_CALL:]
     urls = urls[:MAX_URLS_PER_CALL]
     refresh = _flag(args, "refresh")
@@ -526,11 +593,14 @@ def _tool_extract(args: dict[str, Any], table: ResultsTable, emit: Emit, booths:
         url = urls[i]
         if booths:
             return _model_rows(url, refresh, None, "")[0]
-        rows = layouts.read(i, url, refresh) if layouts else None
+        def load(recipe: dict[str, Any]) -> str:
+            return load_markup(url, refresh, browser=bool(recipe.get("browser")), wait_for=recipe.get("item"))[1]
+
+        rows = layouts.read(i, url, load) if layouts else None
         if rows is None:
             rows, browser = _model_rows(url, refresh, fields, instructions)
             if layouts:
-                layouts.learn(i, url, rows, browser)
+                layouts.learn(i, url, rows, browser, lambda: load_markup(url, browser=browser)[1])
         return _fill_urls(rows, fields, url)
 
     emit("status", {"text": f"📄 Extracting {len(urls)} page{'s' if len(urls) != 1 else ''}…"})
@@ -673,6 +743,159 @@ def _tool_capture_api(args: dict[str, Any], emit: Emit) -> str:
     )
 
 
+# ── Browser sessions ───────────────────────────────────────────────────────
+
+def _format_snapshot(snap: dict[str, Any], offset: int = 0) -> str:
+    """Interactive elements (non-links first) and the page text, within AGENT_PAGE_CHARS."""
+    elements = sorted(snap["elements"], key=lambda e: e["role"] == "link")
+    lines: list[str] = []
+    size = 0
+    for e in elements[:MAX_SNAPSHOT_ELEMENTS]:
+        line = f'  {e["ref"]} {e["role"]} "{e["label"]}"'
+        if e.get("href"):
+            line += f' → {e["href"][:100]}'
+        if "value" in e and e["role"] in ("textbox", "combobox"):
+            line += f' = "{e["value"]}"'
+        if e.get("options"):
+            line += f' (options: {", ".join(e["options"])})'
+        if "checked" in e:
+            line += " [checked]" if e["checked"] else " [not checked]"
+        if size + len(line) > SNAPSHOT_ELEMENT_CHARS:
+            break
+        lines.append(line)
+        size += len(line) + 1
+    text = parse_html(snap["html"], snap["url"])[0]
+    budget = max(3000, AGENT_PAGE_CHARS - size)
+    shown = text[offset:offset + budget]
+    end = offset + len(shown)
+    more = f"; pass offset={end} for more" if end < len(text) else ""
+    return (
+        f'Session {snap["session"]} · {snap["url"]} · "{snap["title"]}"\n'
+        f"Elements ({len(lines)} of {len(elements)}):\n" + "\n".join(lines) + "\n"
+        f"--- TEXT ({len(text):,} chars, showing {offset:,}–{end:,}{more}) ---\n{shown}\n--- END TEXT ---"
+    )
+
+
+def _session_args(args: dict[str, Any]) -> tuple[str, str]:
+    return str(args.get("session") or "").strip(), str(args.get("ref") or "").strip()
+
+
+def _tool_session(name: str, args: dict[str, Any], emit: Emit, sessions: TurnSessions) -> str:
+    sid, ref = _session_args(args)
+    if name == "navigate":
+        url = str(args.get("url", "")).strip()
+        if not url:
+            return "Error: 'url' is required."
+        emit("status", {"text": f"🧭 Opening {url}"})
+        return _format_snapshot(sessions.navigate(url, sid))
+    if not sid:
+        return "Error: 'session' is required (the id navigate returned, e.g. \"s1\")."
+    if name == "snapshot":
+        try:
+            offset = max(0, int(args.get("offset") or 0))
+        except (TypeError, ValueError):
+            return "Error: 'offset' must be a whole number."
+        return _format_snapshot(sessions.snapshot(sid), offset)
+    if name == "scroll_until_end":
+        try:
+            rounds = min(MAX_SCROLL_ROUNDS, max(1, int(args.get("max_rounds") or 10)))
+        except (TypeError, ValueError):
+            return "Error: 'max_rounds' must be a whole number."
+        emit("status", {"text": "🖱️ Scrolling to load more…"})
+        done, start, end, snap = sessions.scroll_until_end(sid, rounds)
+        grown = "the page did not grow" if end <= start else f"page height grew from {start:,} to {end:,} px"
+        return f"Scrolled {done} times; {grown}.\n\n{_format_snapshot(snap)}"
+
+    if not ref:
+        return "Error: 'ref' is required (an element ref from the latest snapshot, e.g. \"e12\")."
+    element = sessions.element(sid, ref) or {}
+    what = f'{element.get("role", "element")} "{element.get("label", ref)}"'
+    if name == "click":
+        emit("status", {"text": f"🖱️ Clicking {what}"})
+        return _format_snapshot(sessions.click(sid, ref))
+    if name == "fill":
+        emit("status", {"text": f"⌨️ Typing into {what}"})
+        return _format_snapshot(sessions.fill(sid, ref, str(args.get("text") or ""), _flag(args, "submit")))
+    if name == "select":
+        value = str(args.get("value") or "")
+        emit("status", {"text": f"🔽 Choosing {value!r} in {what}"})
+        return _format_snapshot(sessions.select(sid, ref, value))
+    return f"Error: unknown session tool {name!r}."
+
+
+def _session_page(sessions: TurnSessions, sid: str) -> tuple[str, str, str]:
+    """(url, text, markup) of the session's current page."""
+    snap = sessions.snapshot(sid)
+    text, _, markup = parse_html(snap["html"], snap["url"])
+    return snap["url"], text, markup
+
+
+def _extract_session(
+    sid: str, fields: list[str], instructions: str, table: ResultsTable, emit: Emit, sessions: TurnSessions,
+) -> str:
+    url, text, _ = _session_page(sessions, sid)
+    emit("status", {"text": f"📄 Extracting from the current page of session {sid}"})
+    rows = _fill_urls(_cached_extract(f"{url}#session", text, url, fields, instructions, False), fields, url)
+    added, updated = table.add(rows)
+    _emit_results(table, emit)
+    merged = f", {updated} existing rows filled in" if updated else ""
+    return f"- {url} (session {sid}): {len(rows)} rows found, {added} new{merged}\n{_table_summary(table)}"
+
+
+def _tool_paginate(args: dict[str, Any], table: ResultsTable, emit: Emit, sessions: TurnSessions) -> str:
+    sid, _ = _session_args(args)
+    next_ref = str(args.get("next_ref") or "").strip()
+    fields = _str_list(args.get("fields"))
+    if not sid or not next_ref:
+        return "Error: 'session' and 'next_ref' (the ref of the Next button or link) are required."
+    if not fields:
+        return "Error: 'fields' is required, e.g. [\"Product Name\", \"Price\"]."
+    try:
+        max_pages = min(MAX_PAGINATE_PAGES, max(1, int(args.get("max_pages") or 10)))
+    except (TypeError, ValueError):
+        return "Error: 'max_pages' must be a whole number."
+    element = sessions.element(sid, next_ref)
+    if element is None:
+        return f"Error: {next_ref} is not in the latest snapshot of {sid}; take a new snapshot."
+    error = table.prepare(fields, _str_list(args.get("key_fields")) or None, _flag(args, "replace"))
+    if error:
+        return error
+    instructions = str(args.get("instructions") or "")
+
+    url, text, markup = _session_page(sessions, sid)
+    layouts = _PageRecipes([url] * max_pages, fields, False) if recipes.RECIPES_ENABLED else None
+    lines: list[str] = []
+    seen_texts: set[str] = set()
+    stop = f"reached max_pages={max_pages}"
+    for page_no in range(max_pages):
+        seen_texts.add(page_cache.text_hash(text))
+        label = f"{url} (page {page_no + 1})"
+        rows = layouts.read(page_no, url, lambda _recipe: markup) if layouts else None
+        if rows is None:
+            rows = _cached_extract(f"{url}#page{page_no + 1}", text, label, fields, instructions, False)
+            if layouts:
+                layouts.learn(page_no, url, rows, False, lambda: markup)
+        added, updated = table.add(_fill_urls(rows, fields, url))
+        _emit_results(table, emit)
+        merged = f", {updated} existing rows filled in" if updated else ""
+        lines.append(f"- {label}: {len(rows)} rows found, {added} new{merged}")
+        emit("status", {"text": f"📄 Page {page_no + 1}: {len(rows)} rows"})
+        if page_no + 1 >= max_pages:
+            break
+        snap = sessions.click_matching(sid, element["role"], element["label"])
+        if snap is None:
+            stop = f'no more "{element["label"]}" {element["role"]} to click'
+            break
+        url = snap["url"]
+        text, _, markup = parse_html(snap["html"], url)
+        if page_cache.text_hash(text) in seen_texts:
+            stop = "the page stopped changing"
+            break
+    if layouts and layouts.uses:
+        recipes.record_uses(layouts.uses)
+    return "\n".join([*lines, f"Stopped: {stop}.", _table_summary(table)])
+
+
 def _tool_map_site(args: dict[str, Any], emit: Emit) -> str:
     url = str(args.get("url", "")).strip()
     if not url:
@@ -691,7 +914,17 @@ def _tool_map_site(args: dict[str, Any], emit: Emit) -> str:
     return f"{total} sitemap URLs{f' containing {include!r}' if include else ''}{shown}:\n" + "\n".join(urls)
 
 
-def _run_tool(name: str, args: dict[str, Any], table: ResultsTable, emit: Emit) -> str:
+_SESSION_TOOLS = {"navigate", "snapshot", "click", "fill", "select", "scroll_until_end"}
+
+
+def _run_tool(name: str, args: dict[str, Any], table: ResultsTable, emit: Emit, sessions: TurnSessions) -> str:
+    if name in _SESSION_TOOLS or name == "paginate":
+        try:
+            if name == "paginate":
+                return _tool_paginate(args, table, emit, sessions)
+            return _tool_session(name, args, emit, sessions)
+        except (StaleRef, KeyError, RuntimeError, PermissionError) as exc:
+            return f"Error: {exc.args[0] if exc.args else exc}"
     if name == "fetch_page":
         return _tool_fetch_page(args, emit)
     if name == "find_feeds":
@@ -703,7 +936,7 @@ def _run_tool(name: str, args: dict[str, Any], table: ResultsTable, emit: Emit) 
     if name == "map_site":
         return _tool_map_site(args, emit)
     if name == "extract":
-        return _tool_extract(args, table, emit)
+        return _tool_extract(args, table, emit, sessions)
     if name == "extract_booths":
         return _tool_extract(args, table, emit, booths=True)
     if name == "clear_results":
@@ -732,6 +965,14 @@ def _preamble_for(name: str, args: dict[str, Any]) -> str:
         return "The site has a data feed, so I'll pull every record from it and fill in your columns ⚡"
     if name == "capture_api":
         return "Let me open that page and watch where it loads its data from — reading that directly is much faster ⚡"
+    if name == "navigate":
+        return f"Let me open {str(args.get('url', '')).strip() or 'the page'} so I can click through it 🧭"
+    if name in ("click", "fill", "select", "snapshot"):
+        return "Let me work through the page to get to the data you need 🖱️"
+    if name == "scroll_until_end":
+        return "This page loads more as you scroll, so I'll scroll to the end first 🖱️"
+    if name == "paginate":
+        return "I'll go through the pages one by one and collect the details as I go 📄"
     if name == "map_site":
         return "Let me read the site map to find all the pages we need 🗺️"
     if name in ("extract", "extract_booths"):
@@ -828,6 +1069,7 @@ def _run_mcp_turn(
     emit: Emit,
     ack: _Acknowledgement,
     cancel: threading.Event | None,
+    sessions: TurnSessions,
 ) -> tuple[str, list[Row]]:
     """One Hermes request; Hermes runs the tools itself via the MCP server and bridge."""
     emit_lock = threading.Lock()
@@ -867,7 +1109,7 @@ def _run_mcp_turn(
         args = {k: v for k, v in args.items() if k != "turn"}
         speak_first(_preamble_for(name, args))
         try:
-            return _run_tool(name, args, table, safe_emit)
+            return _run_tool(name, args, table, safe_emit, sessions)
         except Exception as exc:
             safe_emit("status", {"text": f"⚠️ {name} failed: {exc}"})
             raise
@@ -915,10 +1157,24 @@ def run_turn(
         *({"role": m["role"], "content": m["content"]} for m in history),
     ]
     ack = _Acknowledgement(history)
+    sessions = TurnSessions()
+    try:
+        if AGENT_TOOL_MODE == "mcp":
+            return _run_mcp_turn(turn_id, convo, table, emit, ack, cancel, sessions)
+        return _run_inline_turn(convo, table, emit, ack, cancel, sessions)
+    finally:
+        sessions.close()
 
-    if AGENT_TOOL_MODE == "mcp":
-        return _run_mcp_turn(turn_id, convo, table, emit, ack, cancel)
 
+def _run_inline_turn(
+    convo: list[dict[str, str]],
+    table: ResultsTable,
+    emit: Emit,
+    ack: _Acknowledgement,
+    cancel: threading.Event | None,
+    sessions: TurnSessions,
+) -> tuple[str, list[Row]]:
+    """Hermes calls tools with <tool> blocks parsed here; one Hermes request per step."""
     reply_parts: list[str] = []
     for step in range(AGENT_MAX_STEPS):
         if cancel and cancel.is_set():
@@ -995,7 +1251,7 @@ def run_turn(
         if call_ok:
             log.info("[agent] step %d tool=%s args=%s", step + 1, name, args)
             try:
-                observation = _run_tool(name, args, table, emit)
+                observation = _run_tool(name, args, table, emit, sessions)
             except TurnCancelled:
                 raise
             except Exception as exc:
