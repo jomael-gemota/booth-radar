@@ -29,6 +29,9 @@ import skills
 import tool_bridge
 from extractor import chat_stream, extract, quick_completion
 from results_table import ResultsTable
+import base64
+import time
+import browser as _browser_mod
 from browser import StaleRef, TurnSessions
 from scraper import SCRAPE_CONCURRENCY, load_markup, load_page, parse_html, scrape, used_browser
 
@@ -281,6 +284,16 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
         "{}",
         "clear_results()",
         "Empties the results table. Only when the user asks for a new table.",
+    ),
+    (
+        "screenshot",
+        '{"url": "https://...", "full_page": false}',
+        'screenshot(url="", session="", full_page=false)',
+        "Takes a PNG screenshot of a page and attaches it to the reply.\n"
+        "Pass `url` to load the page fresh (images are shown), or `session` to\n"
+        "capture an open browser session's current view. Set `full_page=true` to\n"
+        "scroll and capture the entire page height. Only call this when the user\n"
+        "explicitly asks for a screenshot.",
     ),
 ]
 
@@ -1238,6 +1251,50 @@ def _tool_map_site(args: dict[str, Any], emit: Emit) -> str:
 _SESSION_TOOLS = {"navigate", "snapshot", "click", "fill", "select", "scroll_until_end"}
 
 
+def _tool_screenshot(args: dict[str, Any], emit: Emit, sessions: TurnSessions) -> str:
+    sid  = str(args.get("session") or "").strip()
+    url  = str(args.get("url")     or "").strip()
+    full = bool(args.get("full_page"))
+
+    if not sid and not url:
+        return "Error: either 'session' or 'url' is required."
+    if sid and url:
+        return "Error: pass either 'session' or 'url', not both."
+
+    if sid:
+        try:
+            snap = sessions.snapshot(sid)
+        except KeyError as exc:
+            return f"Error: {exc.args[0] if exc.args else exc}"
+        page_url = snap.get("url") or sid
+        emit("status", {"text": f"📸 Taking screenshot of {page_url}"})
+        try:
+            png = sessions.screenshot(sid, full)
+        except Exception as exc:
+            return f"Error: screenshot failed: {exc}"
+    else:
+        emit("status", {"text": f"📸 Taking screenshot of {url}"})
+        try:
+            png = _browser_mod.screenshot_url(url, full)
+        except Exception as exc:
+            return f"Error: screenshot failed: {exc}"
+        page_url = url
+
+    from urllib.parse import urlsplit as _urlsplit
+    host = _urlsplit(page_url).hostname or "page"
+    filename = f"screenshot-{host}-{int(time.time())}.png"
+
+    emit("file", {
+        "name": filename,
+        "mime": "image/png",
+        "data": base64.b64encode(png).decode("ascii"),
+    })
+
+    suffix  = " (full page)" if full else ""
+    size_kb = len(png) // 1024
+    return f"Screenshot{suffix} attached: {page_url} ({size_kb} KB)."
+
+
 def _run_tool(
     name: str,
     args: dict[str, Any],
@@ -1278,6 +1335,8 @@ def _run_tool(
         emit("status", {"text": "🧹 Cleared the results table"})
         _emit_results(table, emit)
         return "Results table cleared (0 rows)."
+    if name == "screenshot":
+        return _tool_screenshot(args, emit, sessions)
     return f"Error: unknown tool {name!r}. Available: {', '.join(d[0] for d in _TOOL_DOCS)}."
 
 
@@ -1321,6 +1380,9 @@ def _preamble_for(name: str, args: dict[str, Any]) -> str:
         return "Sure! I'll stop the background job — everything collected so far stays in the table 🛑"
     if name == "clear_results":
         return "Sure! I'll clear the results table so we can start fresh 🧹"
+    if name == "screenshot":
+        target = str(args.get("url") or args.get("session") or "the page")
+        return f"Sure! Let me take a screenshot of {target} and attach it for you 📸"
     return "Give me a moment while I work on that 🔍"
 
 
