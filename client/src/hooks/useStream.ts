@@ -7,6 +7,7 @@ export interface Attachment {
   id: string
   name: string
   size: number
+  mime?: string
 }
 
 interface ThinkingPayload  { text: string }

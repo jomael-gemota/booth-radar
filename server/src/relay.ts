@@ -16,6 +16,7 @@ export interface Attachment {
   id: string;
   name: string;
   size: number;
+  mime?: string;
 }
 
 export interface ChatMessage {
@@ -278,7 +279,8 @@ function acceptFile(turn: Turn, payload: WorkerFilePayload): Attachment | null {
   }
 
   const _id = new ObjectId();
-  const attachment: Attachment = { id: _id.toHexString(), name, size: data.length };
+  const mime = typeof payload.mime === 'string' ? payload.mime : 'application/octet-stream';
+  const attachment: Attachment = { id: _id.toHexString(), name, size: data.length, mime };
   turn.attachments.push(attachment);
   turn.pendingFiles.push(
     files()
@@ -286,7 +288,7 @@ function acceptFile(turn: Turn, payload: WorkerFilePayload): Attachment | null {
         _id,
         conversationId: turn.conversationId,
         name,
-        mime: typeof payload.mime === 'string' ? payload.mime : 'application/octet-stream',
+        mime,
         size: data.length,
         data: new Binary(data),
         createdAt: new Date(),
