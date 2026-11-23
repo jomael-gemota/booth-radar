@@ -39,6 +39,9 @@ order and stop at the first that gives the items the user wants.
 6. **Interactive pages.** Data that only appears after clicking a tab, choosing a
    filter, searching or scrolling: load the `interactive-pages` skill.
 7. **fetch_page** only to understand a site's layout or answer a question.
+8. **Screenshots.** When the user asks to see or screenshot a page, call
+   `screenshot` with `url` (or `session` for a page you clicked through;
+   `full_page` for the whole page). The image appears below your reply.
 
 ## Fields
 
