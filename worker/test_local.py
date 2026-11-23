@@ -8,6 +8,7 @@ Usage:
     python test_local.py --feeds https://example.com       # list data feeds, read the first
     python test_local.py --capture https://example.com/search [--scroll]
                                                            # record a page's JSON APIs, read the first
+    python test_local.py --screenshot https://example.com  # save URL and session screenshots here
     python test_local.py --skills                          # check the Hermes skill files
     python test_local.py --chat                            # chat with the agent in the terminal
     python test_local.py --probe-api                       # probe Hermes API for thinking format
@@ -60,6 +61,35 @@ def feeds(url: str) -> None:
         records, _ = site_feeds.read_feed(url, found[0].id)
         print(f"\n[test] {found[0].id}: {len(records)} records in {time.monotonic() - started:.1f}s; first:")
         print(json.dumps(records[:1], indent=2, ensure_ascii=False))
+
+
+def screenshot(url: str) -> None:
+    import base64
+    from agent import _run_tool
+    from browser import TurnSessions
+    from results_table import ResultsTable
+
+    def emit(type_: str, payload: dict[str, Any]) -> None:
+        if type_ == "file":
+            data = base64.b64decode(payload["data"])
+            with open(payload["name"], "wb") as f:
+                f.write(data)
+            print(f"[test] saved {payload['name']} ({len(data):,} bytes)")
+        elif type_ == "status":
+            print(f"[test] {payload['text']}")
+
+    sessions = TurnSessions()
+    table = ResultsTable([])
+    try:
+        for label, args in (("url", {"url": url}), ("session", {"session": "s1"})):
+            if label == "session":
+                sessions.navigate(url)
+            started = time.monotonic()
+            print(f"[test] {label}: {_run_tool('screenshot', args, table, emit, sessions)}")
+            print(f"[test] {label} took {time.monotonic() - started:.1f}s")
+            time.sleep(1)  # file names carry the second
+    finally:
+        sessions.close()
 
 
 def capture(url: str, scroll: bool) -> None:
@@ -389,6 +419,8 @@ def main() -> None:
         probe_raw(sys.argv[2] if len(sys.argv) > 2 else None)
     elif sys.argv[1] == "--feeds" and len(sys.argv) > 2:
         feeds(sys.argv[2])
+    elif sys.argv[1] == "--screenshot" and len(sys.argv) > 2:
+        screenshot(sys.argv[2])
     elif sys.argv[1] == "--capture" and len(sys.argv) > 2:
         capture(sys.argv[2], "--scroll" in sys.argv[3:])
     elif len(sys.argv) > 3 and sys.argv[2] == "--fields":

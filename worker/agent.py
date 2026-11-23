@@ -10,16 +10,18 @@ the whole turn is a single Hermes request.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import re
 import threading
+import time
 import uuid
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit
 
 import jobs
 import page_cache
@@ -29,10 +31,7 @@ import skills
 import tool_bridge
 from extractor import chat_stream, extract, quick_completion
 from results_table import ResultsTable
-import base64
-import time
-import browser as _browser_mod
-from browser import StaleRef, TurnSessions
+from browser import StaleRef, TurnSessions, screenshot_url
 from scraper import SCRAPE_CONCURRENCY, load_markup, load_page, parse_html, scrape, used_browser
 
 log = logging.getLogger(__name__)
@@ -56,6 +55,8 @@ MAX_SNAPSHOT_ELEMENTS  = 150
 SNAPSHOT_ELEMENT_CHARS = 6000
 MAX_SCROLL_ROUNDS      = 30
 MAX_PAGINATE_PAGES     = 50
+# The server rejects files over MAX_FILE_BYTES (10 MB by default)
+MAX_SCREENSHOT_BYTES   = int(os.getenv("MAX_SCREENSHOT_BYTES", str(9_500_000)))
 HISTORY_CONTEXT_ROWS = 200
 HISTORY_ROW_CHARS    = 300
 
@@ -355,6 +356,7 @@ How to scrape fast
 5. Data behind clicks, filters, search forms or scrolling: navigate and the
    interaction tools.
 6. fetch_page only to understand a layout or answer a question.
+7. The user asks to see or screenshot a page: call screenshot.
 
 Before working on a website, load the matching skill with skill_view —
 always site-scraping, plus any other that fits:
@@ -1261,38 +1263,42 @@ def _tool_screenshot(args: dict[str, Any], emit: Emit, sessions: TurnSessions) -
     if sid and url:
         return "Error: pass either 'session' or 'url', not both."
 
-    if sid:
-        try:
-            snap = sessions.snapshot(sid)
-        except KeyError as exc:
-            return f"Error: {exc.args[0] if exc.args else exc}"
-        page_url = snap.get("url") or sid
-        emit("status", {"text": f"📸 Taking screenshot of {page_url}"})
-        try:
-            png = sessions.screenshot(sid, full)
-        except Exception as exc:
-            return f"Error: screenshot failed: {exc}"
-    else:
-        emit("status", {"text": f"📸 Taking screenshot of {url}"})
-        try:
-            png = _browser_mod.screenshot_url(url, full)
-        except Exception as exc:
-            return f"Error: screenshot failed: {exc}"
-        page_url = url
+    def take(full_page: bool) -> tuple[bytes, bool]:
+        if sid:
+            return sessions.screenshot(sid, full_page)
+        return screenshot_url(url, full_page), True
 
-    from urllib.parse import urlsplit as _urlsplit
-    host = _urlsplit(page_url).hostname or "page"
-    filename = f"screenshot-{host}-{int(time.time())}.png"
+    try:
+        page_url = sessions.url(sid) if sid else url
+        emit("status", {"text": f"📸 Taking a screenshot of {page_url}"})
+        png, complete = take(full)
+        shrunk = full and len(png) > MAX_SCREENSHOT_BYTES
+        if shrunk:
+            png, complete = take(False)
+    except KeyError as exc:
+        return f"Error: {exc.args[0] if exc.args else exc}"
+    except Exception as exc:
+        return f"Error: screenshot failed: {exc}"
+    if len(png) > MAX_SCREENSHOT_BYTES:
+        return f"Error: the screenshot is {len(png) // 1_000_000} MB, over the {MAX_SCREENSHOT_BYTES // 1_000_000} MB limit."
 
+    host = urlsplit(page_url).hostname or "page"
     emit("file", {
-        "name": filename,
+        "name": f"screenshot-{host}-{int(time.time())}.png",
         "mime": "image/png",
         "data": base64.b64encode(png).decode("ascii"),
     })
 
-    suffix  = " (full page)" if full else ""
-    size_kb = len(png) // 1024
-    return f"Screenshot{suffix} attached: {page_url} ({size_kb} KB)."
+    what = "Full-page screenshot" if full and not shrunk else "Screenshot"
+    notes = []
+    if shrunk:
+        notes.append("The full page was too large, so only the visible part was captured.")
+    if not complete:
+        notes.append("The page had been clicked, scrolled or typed into, so some images and fonts may be missing.")
+    return " ".join([
+        f"{what} of {page_url} ({len(png) // 1024} KB) is shown to the user below your reply.",
+        *notes,
+    ])
 
 
 def _run_tool(
