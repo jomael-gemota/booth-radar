@@ -83,7 +83,7 @@ sudo .venv/bin/playwright install --with-deps chromium
 
 ### Hermes MCP Setup
 
-With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `capture_api`, `read_feed`, `map_site`, `fetch_page`, `extract`, `navigate`, `snapshot`, `click`, `fill`, `select`, `scroll_until_end`, `paginate`, `start_job`, `cancel_job`, `extract_booths`, `clear_results`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
+With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `capture_api`, `read_feed`, `map_site`, `fetch_page`, `extract`, `navigate`, `snapshot`, `click`, `fill`, `select`, `scroll_until_end`, `paginate`, `start_job`, `cancel_job`, `extract_booths`, `clear_results`, `screenshot`) natively through `worker/mcp_server.py` instead of using its own browser/terminal tools. Each call is forwarded to a tool bridge inside the worker (`127.0.0.1:TOOL_BRIDGE_PORT`), so the page cache, browser pool and live results table are shared. See [the design log entry](design-log/2026-11-07-general-web-scraping-mcp.md).
 
 1. In `worker/.env`, set `TOOL_BRIDGE_TOKEN` (`openssl rand -hex 32`) and, for fast page extraction, `EXTRACT_BASE_URL` / `EXTRACT_MODEL` (free option: [Ollama](https://ollama.com) on the VM, e.g. `ollama pull qwen2.5:7b-instruct`).
 2. Register the server in `~/.hermes/config.yaml` for the user Hermes runs as:
@@ -113,6 +113,8 @@ With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `cap
 
 **Skills:** the scraping strategy (which route to try first, field naming, directories, interactive pages, product catalogs) lives in `worker/hermes-skills/booth-radar/*/SKILL.md`. In mcp mode the system prompt keeps a short summary and Hermes loads the matching skill with `skill_view`; in inline mode the worker adds the skill files to the prompt. Hermes can edit skills it finds under `external_dirs`, so if `git status` on the VM shows changes under `worker/hermes-skills/`, review them and keep or revert (`git checkout -- worker/hermes-skills`). See [the design log entry](design-log/2026-11-12-hermes-skills.md).
 
+**After a `git pull` that adds or changes tools**, restart Hermes as well as the worker: Hermes starts `mcp_server.py` itself and keeps it running, so until Hermes restarts it only knows the old tool list.
+
 To roll back, set `AGENT_TOOL_MODE=inline` and restart the worker.
 
 ### Scraping & Cache
@@ -139,6 +141,10 @@ Rows from later calls merge into earlier ones when their key columns match (e.g.
 - Pages are rendered in one warm Chromium with up to `SCRAPE_CONCURRENCY` tabs (default **6**). Pages from the same site share a browser context, and images, media, fonts and common trackers are blocked. A render waits for the page to go idle for at most `SCRAPE_IDLE_TIMEOUT_MS` (default **3000**), or only until a learned recipe's selector appears.
 - Scraped pages, feeds, sitemaps and extracted rows are cached in worker memory for `PAGE_CACHE_TTL` seconds (default **3600 s**, up to `PAGE_CACHE_MAX` entries). Follow-up questions are answered without re-scraping.
 - The cache clears on worker restart. Set `PAGE_CACHE_TTL=0` to disable it.
+
+### Screenshots
+
+When the user asks to see a page, the agent calls `screenshot` with a `url` (loaded in a fresh tab with images and fonts) or a browser `session` (the page it clicked through), optionally `full_page`. The PNG is shown in the chat with a download link. A session page that hasn't been clicked or typed into is reloaded with images; after interactions only its images are re-requested, so fonts and lazy images may be missing. A full-page shot over `MAX_SCREENSHOT_BYTES` (9.5 MB) falls back to the visible part. Test on the VM with `python test_local.py --screenshot https://example.com` (saves both kinds in the current folder). See [the design log entry](design-log/2026-11-24-screenshot-session-images.md).
 
 ### File Downloads
 
