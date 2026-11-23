@@ -102,6 +102,17 @@ _SNAPSHOT_JS = r"""
 """
 
 
+_RELOAD_IMAGES_JS = """
+() => {
+  for (const img of document.images) {
+    const src = img.src, srcset = img.srcset;
+    img.srcset = ''; img.src = '';
+    img.srcset = srcset; img.src = src;
+  }
+}
+"""
+
+
 class StaleRef(Exception):
     """The element ref no longer exists on the page."""
 
@@ -378,6 +389,9 @@ class _Session:
         self.context = context
         self.page = page
         self.elements: list[dict[str, Any]] = []
+        # Set by click/fill/select/scroll: reloading the page would lose that state.
+        self.interacted = False
+        self.shows_images = False
 
 
 async def _snapshot(session: _Session) -> dict[str, Any]:
@@ -475,6 +489,7 @@ class TurnSessions:
                     session = _Session(sid or f"s{self._count}", context, await context.new_page())
                     self._sessions[session.id] = session
                 await session.page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                session.interacted = False
                 await _settle(session.page, None, ACTION_IDLE_MS)
                 return await _snapshot(session)
 
@@ -483,6 +498,9 @@ class TurnSessions:
     def snapshot(self, sid: str) -> dict[str, Any]:
         with self._lock:
             return run(_snapshot(self._get(sid)))
+
+    def url(self, sid: str) -> str:
+        return self._get(sid).page.url
 
     def element(self, sid: str, ref: str) -> dict[str, Any] | None:
         """The element *ref* as listed in the session's last snapshot."""
@@ -495,6 +513,7 @@ class TurnSessions:
             async def go() -> dict[str, Any]:
                 locator = await _require(session, ref)
                 before = set(session.context.pages)
+                session.interacted = True
                 fallback = await _click(session, locator)
                 snap = await _after_action(session, before)
                 if fallback:
@@ -514,6 +533,7 @@ class TurnSessions:
                 if match is None:
                     return None
                 before = set(session.context.pages)
+                session.interacted = True
                 try:
                     await _click(session, _locator(session, match["ref"]))
                 except Exception as exc:
@@ -530,6 +550,7 @@ class TurnSessions:
             async def go() -> dict[str, Any]:
                 locator = await _require(session, ref)
                 before = set(session.context.pages)
+                session.interacted = True
                 await locator.fill(text, timeout=ACTION_TIMEOUT_MS)
                 if submit:
                     await locator.press("Enter", timeout=ACTION_TIMEOUT_MS)
@@ -544,6 +565,7 @@ class TurnSessions:
             async def go() -> dict[str, Any]:
                 locator = await _require(session, ref)
                 before = set(session.context.pages)
+                session.interacted = True
                 try:
                     await locator.select_option(label=value, timeout=ACTION_TIMEOUT_MS)
                 except Exception:
@@ -559,6 +581,7 @@ class TurnSessions:
 
             async def go() -> tuple[int, int, int, dict[str, Any]]:
                 page = session.page
+                session.interacted = True
                 measure = "document.documentElement.scrollHeight"
                 start = height = int(await page.evaluate(measure))
                 rounds = still = 0
@@ -579,13 +602,30 @@ class TurnSessions:
 
             return run(go(), timeout=CALL_TIMEOUT_S + max_rounds * SCROLL_WAIT_MS / 1000)
 
-    def screenshot(self, sid: str, full_page: bool = False) -> bytes:
-        """PNG screenshot of the session's current page."""
+    def screenshot(self, sid: str, full_page: bool = False) -> tuple[bytes, bool]:
+        """
+        PNG screenshot of the session's current page and whether it is complete.
+        The session loads images and fonts from now on. An untouched page is reloaded
+        so they appear; after clicks or typing only the page's images are re-requested
+        (reloading would undo them), so fonts and lazy images may be missing.
+        """
         with self._lock:
             session = self._get(sid)
 
-            async def go() -> bytes:
-                return await session.page.screenshot(type="png", full_page=full_page)
+            async def go() -> tuple[bytes, bool]:
+                page = session.page
+                complete = True
+                if not session.shows_images:
+                    await session.context.unroute("**/*", _route)
+                    await session.context.route("**/*", _route_screenshot)
+                    session.shows_images = True
+                    if session.interacted:
+                        await page.evaluate(_RELOAD_IMAGES_JS)
+                        complete = False
+                    else:
+                        await page.reload(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                    await _settle(page, None, SCRAPE_IDLE_TIMEOUT_MS)
+                return await page.screenshot(type="png", full_page=full_page), complete
 
             return run(go())
 
