@@ -45,6 +45,8 @@ CAPTURE_SCROLL_ROUNDS  = 5
 SCROLL_WAIT_MS         = 2500
 
 _BLOCKED_RESOURCES = {"image", "media", "font"}
+# For screenshot loads: only block media and trackers so the page renders visually.
+_SCREENSHOT_BLOCKED_RESOURCES = {"media"}
 _TRACKER_HOSTS = (
     "google-analytics.com", "googletagmanager.com", "doubleclick.net", "googlesyndication.com",
     "googleadservices.com", "facebook.net", "hotjar.com", "hotjar.io", "clarity.ms",
@@ -195,6 +197,25 @@ async def _route(route: Any) -> None:
         await route.abort("blockedbyclient")
 
 
+async def _route_screenshot(route: Any) -> None:
+    """Like _route but allows images and fonts so screenshots render visually."""
+    request = route.request
+    url = request.url
+    if request.resource_type in _SCREENSHOT_BLOCKED_RESOURCES or _is_tracker(urlsplit(url).hostname or ""):
+        await route.abort()
+        return
+    try:
+        top = request.is_navigation_request() and request.frame.parent_frame is None
+    except Exception:
+        top = False
+    allowed = await asyncio.get_running_loop().run_in_executor(None, _allowed, url, top)
+    if allowed:
+        await route.continue_()
+    else:
+        log.info("[browser] blocked %s", url)
+        await route.abort("blockedbyclient")
+
+
 async def _new_context() -> Any:
     context = await (await _browser()).new_context()
     await context.route("**/*", _route)
@@ -326,6 +347,27 @@ async def _capture(url: str, scroll: bool) -> list[dict[str, Any]]:
 def capture(url: str, scroll: bool = False) -> list[dict[str, Any]]:
     """JSON XHR/fetch responses received while *url* loads: method, url, headers, body, data."""
     return run(_retry(lambda: _capture(url, scroll)))
+
+
+async def _screenshot_url(url: str, full_page: bool) -> bytes:
+    """Load *url* in an isolated context (images allowed) and return a PNG screenshot."""
+    async with _tabs():
+        context = await (await _browser()).new_context()
+        await context.route("**/*", _route_screenshot)
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            await _settle(page, None, SCRAPE_IDLE_TIMEOUT_MS)
+            return await page.screenshot(type="png", full_page=full_page)
+        finally:
+            await _close(page)
+            await _close(context)
+
+
+def screenshot_url(url: str, full_page: bool = False) -> bytes:
+    """PNG screenshot of *url* (images loaded, trackers blocked)."""
+    net_guard.check_url(url, net_guard.RESPECT_ROBOTS)
+    return run(_retry(lambda: _screenshot_url(url, full_page)))
 
 
 # ── Sessions ───────────────────────────────────────────────────────────────
@@ -536,6 +578,16 @@ class TurnSessions:
                 return rounds, start, height, await _snapshot(session)
 
             return run(go(), timeout=CALL_TIMEOUT_S + max_rounds * SCROLL_WAIT_MS / 1000)
+
+    def screenshot(self, sid: str, full_page: bool = False) -> bytes:
+        """PNG screenshot of the session's current page."""
+        with self._lock:
+            session = self._get(sid)
+
+            async def go() -> bytes:
+                return await session.page.screenshot(type="png", full_page=full_page)
+
+            return run(go())
 
     def close(self) -> None:
         with self._lock:

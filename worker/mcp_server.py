@@ -270,5 +270,21 @@ async def clear_results(turn: str = "") -> str:
     return await _call("clear_results", turn)
 
 
+@server.tool(structured_output=False)
+async def screenshot(
+    url: str = "",
+    session: str = "",
+    full_page: bool = False,
+    turn: str = "",
+) -> str:
+    """
+    Take a PNG screenshot of a page and attach it to the reply. Pass `url` to load
+    the page fresh (images are shown), or `session` to capture an open browser
+    session's current view. Set `full_page=true` to capture the full page height.
+    Only call this when the user explicitly asks for a screenshot.
+    """
+    return await _call("screenshot", turn, url=url, session=session, full_page=full_page)
+
+
 if __name__ == "__main__":
     server.run("stdio")

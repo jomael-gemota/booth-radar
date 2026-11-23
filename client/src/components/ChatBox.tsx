@@ -1410,6 +1410,28 @@ function formatBytes(n: number) {
 }
 
 function AttachmentChip({ file }: { file: Attachment }) {
+  if (file.mime?.startsWith('image/')) {
+    return (
+      <div className="attachment-image">
+        <img
+          src={`/api/files/${file.id}`}
+          alt={file.name}
+          className="attachment-image-preview"
+        />
+        <a
+          className="attachment-image-download"
+          href={`/api/files/${file.id}`}
+          download={file.name}
+          title={`Download ${file.name}`}
+        >
+          <DownloadIcon />
+          <span>{file.name}</span>
+          <span className="attachment-chip-size">{formatBytes(file.size)}</span>
+        </a>
+      </div>
+    )
+  }
+
   const dot = file.name.lastIndexOf('.')
   const ext = dot > 0 ? file.name.slice(dot + 1).toUpperCase() : 'FILE'
   return (
