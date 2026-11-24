@@ -65,6 +65,7 @@ def feeds(url: str) -> None:
 
 def screenshot(url: str) -> None:
     import base64
+    import logging
     from agent import _run_tool
     from browser import TurnSessions
     from results_table import ResultsTable
@@ -78,6 +79,7 @@ def screenshot(url: str) -> None:
         elif type_ == "status":
             print(f"[test] {payload['text']}")
 
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     sessions = TurnSessions()
     table = ResultsTable([])
     try:
