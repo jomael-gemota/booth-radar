@@ -13,12 +13,14 @@ net_guard (public hosts only; robots.txt for page navigations).
 from __future__ import annotations
 
 import asyncio
+import base64
 import concurrent.futures
 import json
 import logging
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, TypeVar
 from urllib.parse import urlsplit
 
@@ -36,6 +38,13 @@ ACTION_IDLE_MS    = 3000
 CONTEXT_IDLE_S    = 600
 CALL_TIMEOUT_S    = 180
 MAX_SESSIONS      = 3
+ROUTE_CHECK_THREADS = 16
+
+# Screenshots wait at most this long for the page's load event, then capture what rendered
+SCREENSHOT_LOAD_MS       = int(os.getenv("SCREENSHOT_LOAD_MS", "20000"))
+SCREENSHOT_TIMEOUT_MS    = 30_000
+SCREENSHOT_QUICK_MS      = 5000  # first try on a page that never finished loading
+SCREENSHOT_PENDING_SHOWN = 5
 
 # capture(): JSON responses recorded while a page loads
 MAX_CAPTURED_RESPONSES = 40
@@ -190,41 +199,36 @@ def _allowed(url: str, top_navigation: bool) -> bool:
     return not (top_navigation and net_guard.RESPECT_ROBOTS) or net_guard.robots_allows(url)
 
 
-async def _route(route: Any) -> None:
+# Host checks can block on DNS; a pool of their own keeps a page's many image hosts
+# from starving the default executor (a few threads on a small VM).
+_checks = concurrent.futures.ThreadPoolExecutor(max_workers=ROUTE_CHECK_THREADS, thread_name_prefix="net-check")
+
+
+async def _guard(route: Any, blocked: set[str]) -> None:
     request = route.request
     url = request.url
-    if request.resource_type in _BLOCKED_RESOURCES or _is_tracker(urlsplit(url).hostname or ""):
+    if request.resource_type in blocked or _is_tracker(urlsplit(url).hostname or ""):
         await route.abort()
         return
     try:
         top = request.is_navigation_request() and request.frame.parent_frame is None
     except Exception:
         top = False
-    allowed = await asyncio.get_running_loop().run_in_executor(None, _allowed, url, top)
+    allowed = await asyncio.get_running_loop().run_in_executor(_checks, _allowed, url, top)
     if allowed:
         await route.continue_()
     else:
         log.info("[browser] blocked %s", url)
         await route.abort("blockedbyclient")
+
+
+async def _route(route: Any) -> None:
+    await _guard(route, _BLOCKED_RESOURCES)
 
 
 async def _route_screenshot(route: Any) -> None:
     """Like _route but allows images and fonts so screenshots render visually."""
-    request = route.request
-    url = request.url
-    if request.resource_type in _SCREENSHOT_BLOCKED_RESOURCES or _is_tracker(urlsplit(url).hostname or ""):
-        await route.abort()
-        return
-    try:
-        top = request.is_navigation_request() and request.frame.parent_frame is None
-    except Exception:
-        top = False
-    allowed = await asyncio.get_running_loop().run_in_executor(None, _allowed, url, top)
-    if allowed:
-        await route.continue_()
-    else:
-        log.info("[browser] blocked %s", url)
-        await route.abort("blockedbyclient")
+    await _guard(route, _SCREENSHOT_BLOCKED_RESOURCES)
 
 
 async def _new_context() -> Any:
@@ -360,23 +364,98 @@ def capture(url: str, scroll: bool = False) -> list[dict[str, Any]]:
     return run(_retry(lambda: _capture(url, scroll)))
 
 
-async def _screenshot_url(url: str, full_page: bool) -> bytes:
-    """Load *url* in an isolated context (images allowed) and return a PNG screenshot."""
+@dataclass
+class Shot:
+    png: bytes
+    # False when the page had been interacted with, so images were only re-requested
+    complete: bool = True
+    # Requests still loading when the screenshot was taken (the page never finished)
+    stalled: list[str] = field(default_factory=list)
+
+
+async def _capture_png(page: Any, full_page: bool, quick: bool) -> bytes:
+    """
+    page.screenshot waits for web fonts and can hang on a page that never finished
+    loading; then capture through the DevTools protocol, which takes the frame as is.
+    """
+    from playwright.async_api import TimeoutError as PlaywrightTimeout  # type: ignore
+
+    timeout = SCREENSHOT_QUICK_MS if quick else SCREENSHOT_TIMEOUT_MS
+    try:
+        return await page.screenshot(type="png", full_page=full_page, timeout=timeout)
+    except PlaywrightTimeout:
+        log.info("[browser] screenshot of %s timed out, capturing the frame directly", page.url)
+    cdp = await page.context.new_cdp_session(page)
+    try:
+        params: dict[str, Any] = {"format": "png"}
+        if full_page:
+            size = (await cdp.send("Page.getLayoutMetrics"))["cssContentSize"]
+            params["captureBeyondViewport"] = True
+            params["clip"] = {"x": 0, "y": 0, "width": size["width"], "height": size["height"], "scale": 1}
+        data = await asyncio.wait_for(cdp.send("Page.captureScreenshot", params), SCREENSHOT_TIMEOUT_MS / 1000)
+        return base64.b64decode(data["data"])
+    finally:
+        await _close_cdp(cdp)
+
+
+async def _close_cdp(cdp: Any) -> None:
+    try:
+        await cdp.detach()
+    except Exception:
+        pass
+
+
+async def _shoot(page: Any, load: Callable[[], Awaitable[Any]] | None, full_page: bool) -> Shot:
+    """
+    Run *load* (a goto or reload that only waits for the response), wait up to
+    SCREENSHOT_LOAD_MS for the page to finish loading, then capture whatever rendered.
+    """
+    from playwright.async_api import TimeoutError as PlaywrightTimeout  # type: ignore
+
+    pending: dict[Any, str] = {}
+    handlers = {
+        "request": lambda r: pending.__setitem__(r, r.url),
+        "requestfinished": lambda r: pending.pop(r, None),
+        "requestfailed": lambda r: pending.pop(r, None),
+    }
+    for event, handler in handlers.items():
+        page.on(event, handler)
+    try:
+        stalled: list[str] = []
+        if load is not None:
+            await load()
+            try:
+                await page.wait_for_load_state("load", timeout=SCREENSHOT_LOAD_MS)
+            except PlaywrightTimeout:
+                stalled = list(pending.values())
+                log.info(
+                    "[browser] %s not loaded after %d ms, %d requests pending: %s",
+                    page.url, SCREENSHOT_LOAD_MS, len(stalled), stalled[:SCREENSHOT_PENDING_SHOWN],
+                )
+        if not stalled:
+            await _settle(page, None, SCRAPE_IDLE_TIMEOUT_MS)
+        return Shot(await _capture_png(page, full_page, quick=bool(stalled)), stalled=stalled)
+    finally:
+        for event, handler in handlers.items():
+            page.remove_listener(event, handler)
+
+
+async def _screenshot_url(url: str, full_page: bool) -> Shot:
     async with _tabs():
         context = await (await _browser()).new_context()
         await context.route("**/*", _route_screenshot)
         page = await context.new_page()
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-            await _settle(page, None, SCRAPE_IDLE_TIMEOUT_MS)
-            return await page.screenshot(type="png", full_page=full_page)
+            return await _shoot(
+                page, lambda: page.goto(url, wait_until="commit", timeout=NAV_TIMEOUT_MS), full_page,
+            )
         finally:
             await _close(page)
             await _close(context)
 
 
-def screenshot_url(url: str, full_page: bool = False) -> bytes:
-    """PNG screenshot of *url* (images loaded, trackers blocked)."""
+def screenshot_url(url: str, full_page: bool = False) -> Shot:
+    """Screenshot of *url* in an isolated context (images and fonts loaded, trackers blocked)."""
     net_guard.check_url(url, net_guard.RESPECT_ROBOTS)
     return run(_retry(lambda: _screenshot_url(url, full_page)))
 
@@ -602,30 +681,31 @@ class TurnSessions:
 
             return run(go(), timeout=CALL_TIMEOUT_S + max_rounds * SCROLL_WAIT_MS / 1000)
 
-    def screenshot(self, sid: str, full_page: bool = False) -> tuple[bytes, bool]:
+    def screenshot(self, sid: str, full_page: bool = False) -> Shot:
         """
-        PNG screenshot of the session's current page and whether it is complete.
-        The session loads images and fonts from now on. An untouched page is reloaded
-        so they appear; after clicks or typing only the page's images are re-requested
-        (reloading would undo them), so fonts and lazy images may be missing.
+        Screenshot of the session's current page. The session loads images and fonts
+        from now on. An untouched page is reloaded so they appear; after clicks or typing
+        only the page's images are re-requested (reloading would undo them), so fonts and
+        lazy images may be missing.
         """
         with self._lock:
             session = self._get(sid)
 
-            async def go() -> tuple[bytes, bool]:
+            async def go() -> Shot:
                 page = session.page
-                complete = True
-                if not session.shows_images:
-                    await session.context.unroute("**/*", _route)
-                    await session.context.route("**/*", _route_screenshot)
-                    session.shows_images = True
-                    if session.interacted:
-                        await page.evaluate(_RELOAD_IMAGES_JS)
-                        complete = False
-                    else:
-                        await page.reload(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-                    await _settle(page, None, SCRAPE_IDLE_TIMEOUT_MS)
-                return await page.screenshot(type="png", full_page=full_page), complete
+                if session.shows_images:
+                    return await _shoot(page, None, full_page)
+                await session.context.unroute("**/*", _route)
+                await session.context.route("**/*", _route_screenshot)
+                session.shows_images = True
+                if not session.interacted:
+                    return await _shoot(
+                        page, lambda: page.reload(wait_until="commit", timeout=NAV_TIMEOUT_MS), full_page,
+                    )
+                await page.evaluate(_RELOAD_IMAGES_JS)
+                shot = await _shoot(page, None, full_page)
+                shot.complete = False
+                return shot
 
             return run(go())
 
