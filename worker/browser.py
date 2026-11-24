@@ -41,9 +41,8 @@ MAX_SESSIONS      = 3
 ROUTE_CHECK_THREADS = 16
 
 # Screenshots wait at most this long for the page's load event, then capture what rendered
-SCREENSHOT_LOAD_MS       = int(os.getenv("SCREENSHOT_LOAD_MS", "20000"))
+SCREENSHOT_LOAD_MS       = int(os.getenv("SCREENSHOT_LOAD_MS", "12000"))
 SCREENSHOT_TIMEOUT_MS    = 30_000
-SCREENSHOT_QUICK_MS      = 5000  # first try on a page that never finished loading
 SCREENSHOT_PENDING_SHOWN = 5
 
 # capture(): JSON responses recorded while a page loads
@@ -63,6 +62,8 @@ _TRACKER_HOSTS = (
     "bat.bing.com", "ads-twitter.com", "criteo.com", "criteo.net", "taboola.com", "outbrain.com",
     "adnxs.com", "amazon-adsystem.com", "nr-data.net", "fullstory.com", "mouseflow.com",
     "quantserve.com", "scorecardresearch.com", "mixpanel.com", "heap.io", "heapanalytics.com",
+    # visitor IP lookups
+    "ipify.org", "ipinfo.io", "ipapi.co",
 )
 
 # Tags visible interactive elements with data-br-ref="eN" and describes them.
@@ -373,18 +374,19 @@ class Shot:
     stalled: list[str] = field(default_factory=list)
 
 
-async def _capture_png(page: Any, full_page: bool, quick: bool) -> bytes:
+async def _capture_png(page: Any, full_page: bool, stalled: bool) -> bytes:
     """
-    page.screenshot waits for web fonts and can hang on a page that never finished
-    loading; then capture through the DevTools protocol, which takes the frame as is.
+    page.screenshot waits for web fonts and hangs on a page that never finished
+    loading; such pages are captured through the DevTools protocol, which takes the
+    frame as is.
     """
     from playwright.async_api import TimeoutError as PlaywrightTimeout  # type: ignore
 
-    timeout = SCREENSHOT_QUICK_MS if quick else SCREENSHOT_TIMEOUT_MS
-    try:
-        return await page.screenshot(type="png", full_page=full_page, timeout=timeout)
-    except PlaywrightTimeout:
-        log.info("[browser] screenshot of %s timed out, capturing the frame directly", page.url)
+    if not stalled:
+        try:
+            return await page.screenshot(type="png", full_page=full_page, timeout=SCREENSHOT_TIMEOUT_MS)
+        except PlaywrightTimeout:
+            log.info("[browser] screenshot of %s timed out, capturing the frame directly", page.url)
     cdp = await page.context.new_cdp_session(page)
     try:
         params: dict[str, Any] = {"format": "png"}
@@ -434,7 +436,7 @@ async def _shoot(page: Any, load: Callable[[], Awaitable[Any]] | None, full_page
                 )
         if not stalled:
             await _settle(page, None, SCRAPE_IDLE_TIMEOUT_MS)
-        return Shot(await _capture_png(page, full_page, quick=bool(stalled)), stalled=stalled)
+        return Shot(await _capture_png(page, full_page, stalled=bool(stalled)), stalled=stalled)
     finally:
         for event, handler in handlers.items():
             page.remove_listener(event, handler)
