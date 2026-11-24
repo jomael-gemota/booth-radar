@@ -31,7 +31,7 @@ import skills
 import tool_bridge
 from extractor import chat_stream, extract, quick_completion
 from results_table import ResultsTable
-from browser import StaleRef, TurnSessions, screenshot_url
+from browser import Shot, StaleRef, TurnSessions, screenshot_url
 from scraper import SCRAPE_CONCURRENCY, load_markup, load_page, parse_html, scrape, used_browser
 
 log = logging.getLogger(__name__)
@@ -1263,22 +1263,21 @@ def _tool_screenshot(args: dict[str, Any], emit: Emit, sessions: TurnSessions) -
     if sid and url:
         return "Error: pass either 'session' or 'url', not both."
 
-    def take(full_page: bool) -> tuple[bytes, bool]:
-        if sid:
-            return sessions.screenshot(sid, full_page)
-        return screenshot_url(url, full_page), True
+    def take(full_page: bool) -> Shot:
+        return sessions.screenshot(sid, full_page) if sid else screenshot_url(url, full_page)
 
     try:
         page_url = sessions.url(sid) if sid else url
         emit("status", {"text": f"📸 Taking a screenshot of {page_url}"})
-        png, complete = take(full)
-        shrunk = full and len(png) > MAX_SCREENSHOT_BYTES
+        shot = take(full)
+        shrunk = full and len(shot.png) > MAX_SCREENSHOT_BYTES
         if shrunk:
-            png, complete = take(False)
+            shot = take(False)
     except KeyError as exc:
         return f"Error: {exc.args[0] if exc.args else exc}"
     except Exception as exc:
         return f"Error: screenshot failed: {exc}"
+    png = shot.png
     if len(png) > MAX_SCREENSHOT_BYTES:
         return f"Error: the screenshot is {len(png) // 1_000_000} MB, over the {MAX_SCREENSHOT_BYTES // 1_000_000} MB limit."
 
@@ -1293,8 +1292,14 @@ def _tool_screenshot(args: dict[str, Any], emit: Emit, sessions: TurnSessions) -
     notes = []
     if shrunk:
         notes.append("The full page was too large, so only the visible part was captured.")
-    if not complete:
+    if not shot.complete:
         notes.append("The page had been clicked, scrolled or typed into, so some images and fonts may be missing.")
+    if shot.stalled:
+        hosts = sorted({urlsplit(u).hostname or u for u in shot.stalled})
+        notes.append(
+            f"The page was still loading {len(shot.stalled)} files (from {', '.join(hosts[:5])}), "
+            "so parts of it may be blank."
+        )
     return " ".join([
         f"{what} of {page_url} ({len(png) // 1024} KB) is shown to the user below your reply.",
         *notes,
