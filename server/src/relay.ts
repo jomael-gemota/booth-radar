@@ -2,7 +2,7 @@ import type { Response } from 'express';
 import { WebSocket } from 'ws';
 import { Binary, ObjectId } from 'mongodb';
 import { getDb } from './db.js';
-import { dispatchJobs, handleJobFrame } from './jobs.js';
+import { contextFor, dispatchJobs, handleJobFrame, latestJob } from './jobs.js';
 
 // ── Shared types ───────────────────────────────────────────────────────────
 
@@ -95,16 +95,28 @@ interface Turn {
   pendingFiles: Promise<unknown>[];
   /** Unix ms when startTurn() was called — used to compute response duration. */
   startedAt: number;
+  /** The chat frame's inputs, so the turn can be sent again if the worker loses it. */
+  request: { messages: Pick<ChatMessage, 'role' | 'content'>[]; results: ResultRow[] };
+  restarts: number;
+  /** The worker disconnected mid-turn and hasn't reported the turn since. */
+  orphaned: boolean;
 }
 
 // How long a finished turn's events stay available for late SSE subscribers
 const TURN_RETENTION_MS = 60_000;
+// How long orphaned turns wait for the worker to reconnect before failing
+const WORKER_GRACE_MS = Number(process.env.WORKER_GRACE_MS ?? 120_000);
+// How long a reconnected worker has to send `hello` (older workers never do)
+const HELLO_TIMEOUT_MS = 10_000;
+// Times one turn is sent again after the worker lost it (restart or crash)
+const MAX_TURN_RESTARTS = Number(process.env.MAX_TURN_RESTARTS ?? 2);
 
 const turns = new Map<string, Turn>();
 // conversationId → turnId of the turn currently running
 const activeTurns = new Map<string, string>();
 
 let workerSocket: WebSocket | null = null;
+let graceTimer: ReturnType<typeof setTimeout> | undefined;
 
 export function conversations() {
   return getDb().collection<ConversationDoc>('conversations');
@@ -171,9 +183,23 @@ export function startTurn(
     attachments: [],
     pendingFiles: [],
     startedAt: Date.now(),
+    request: { messages, results },
+    restarts: 0,
+    orphaned: false,
   });
   activeTurns.set(conversationId.toHexString(), turnId);
-  workerSocket.send(JSON.stringify({
+  sendChat(workerSocket, turnId, conversationId, messages, results, job);
+}
+
+function sendChat(
+  ws: WebSocket,
+  turnId: string,
+  conversationId: ObjectId,
+  messages: Pick<ChatMessage, 'role' | 'content'>[],
+  results: ResultRow[],
+  job: unknown,
+): void {
+  ws.send(JSON.stringify({
     type: 'chat',
     turnId,
     conversationId: conversationId.toHexString(),
@@ -181,6 +207,25 @@ export function startTurn(
     results,
     job,
   }));
+}
+
+/** Send a turn the worker lost again, with the job context as it is now. */
+async function restartTurn(ws: WebSocket, turnId: string, turn: Turn): Promise<void> {
+  turn.restarts += 1;
+  turn.orphaned = false;
+  broadcastStatus(turnId, turn, '🔄 The worker restarted. Starting your request again…');
+  let job = null;
+  try {
+    job = await latestJob(turn.conversationId);
+  } catch (err) {
+    console.error(`[jobs] failed to load the job context for turn ${turnId}`, err);
+  }
+  if (turn.finished) return;
+  if (ws !== workerSocket || ws.readyState !== WebSocket.OPEN) {
+    turn.orphaned = true; // the new connection dropped too; wait for the next one
+    return;
+  }
+  sendChat(ws, turnId, turn.conversationId, turn.request.messages, turn.request.results, job ? contextFor(job) : null);
 }
 
 function broadcast(turnId: string, turn: Turn, type: WorkerEventType, payload: unknown): void {
@@ -198,6 +243,12 @@ function broadcast(turnId: string, turn: Turn, type: WorkerEventType, payload: u
     turn.clients.clear();
     setTimeout(() => turns.delete(turnId), TURN_RETENTION_MS);
   }
+}
+
+/** Show a server-side status line in the turn's activity, and keep it in the saved thinking. */
+function broadcastStatus(turnId: string, turn: Turn, text: string): void {
+  persist(turn, 'status', { text }).catch(() => undefined);
+  broadcast(turnId, turn, 'status', { text });
 }
 
 /** Attach an SSE response to a turn, replaying the events emitted after event id *after*. */
@@ -326,17 +377,95 @@ export function cancelTurn(turnId: string): boolean {
 
 // ── Worker socket ──────────────────────────────────────────────────────────
 
+/** Turns stop failing on disconnect: they wait for the worker to come back. */
+function orphanTurns(): void {
+  let count = 0;
+  for (const [turnId, turn] of turns) {
+    if (turn.finished || turn.orphaned) continue;
+    turn.orphaned = true;
+    count += 1;
+    broadcastStatus(turnId, turn, '⚠️ Lost the connection to the worker. Waiting for it to reconnect…');
+  }
+  if (!count || graceTimer) return;
+  graceTimer = setTimeout(() => {
+    graceTimer = undefined;
+    for (const [turnId, turn] of turns) {
+      if (turn.finished || !turn.orphaned) continue;
+      console.warn(`[ws] turn ${turnId} failed: the worker did not reconnect in time`);
+      broadcast(turnId, turn, 'error', {
+        message: 'The Booth Radar worker went offline while handling your message and did not come back. Please try again in a few minutes.',
+      });
+    }
+  }, WORKER_GRACE_MS);
+}
+
+/** Resume the orphaned turns the reconnected worker still owns; send the others again. */
+function adoptTurns(ws: WebSocket, owned: Set<string>): void {
+  clearTimeout(graceTimer);
+  graceTimer = undefined;
+  for (const [turnId, turn] of turns) {
+    if (turn.finished || !turn.orphaned) continue;
+    if (owned.has(turnId)) {
+      turn.orphaned = false;
+      console.log(`[ws] turn ${turnId} resumed after the worker reconnected`);
+      broadcastStatus(turnId, turn, '✅ Reconnected to the worker. Continuing…');
+    } else if (turn.restarts < MAX_TURN_RESTARTS) {
+      console.log(`[ws] turn ${turnId} lost by the worker, restarting (${turn.restarts + 1}/${MAX_TURN_RESTARTS})`);
+      restartTurn(ws, turnId, turn).catch((err) => console.error(`[ws] failed to restart turn ${turnId}`, err));
+    } else {
+      console.warn(`[ws] turn ${turnId} failed: lost by the worker ${turn.restarts + 1} times`);
+      broadcast(turnId, turn, 'error', {
+        message: 'The Booth Radar worker kept restarting while handling your message. Please try again, or try a narrower request.',
+      });
+    }
+  }
+}
+
+// A worker that stops pinging (machine asleep, network gone) can leave a socket that
+// never closes; it pings every 20 s, so silence this long means it is gone.
+const WORKER_SILENCE_MS = 75_000;
+
 export function attachWorker(ws: WebSocket): void {
   console.log('[ws] worker connected');
+  const previous = workerSocket;
   workerSocket = ws;
+  if (previous) {
+    // The old connection never reported closing; its turns now depend on this one.
+    orphanTurns();
+    previous.terminate();
+  }
   dispatchJobs().catch((err) => console.error('[jobs] failed to dispatch unfinished jobs', err));
 
+  let helloReceived = false;
+  const helloTimer = setTimeout(() => {
+    helloReceived = true;
+    if (workerSocket === ws) adoptTurns(ws, new Set());
+  }, HELLO_TIMEOUT_MS);
+
+  let lastSeen = Date.now();
+  ws.on('ping', () => { lastSeen = Date.now(); });
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastSeen < WORKER_SILENCE_MS) return;
+    console.warn('[ws] worker stopped responding, closing its connection');
+    ws.terminate();
+  }, 15_000);
+
   ws.on('message', (raw) => {
+    lastSeen = Date.now();
     let msg: WorkerMessage;
     try {
       msg = JSON.parse(raw.toString()) as WorkerMessage;
     } catch (err) {
       console.error('[ws] failed to parse worker message', err);
+      return;
+    }
+
+    if ((msg.type as string) === 'hello') {
+      if (helloReceived) return;
+      helloReceived = true;
+      clearTimeout(helloTimer);
+      const owned = (msg as unknown as { turns?: unknown }).turns;
+      if (workerSocket === ws) adoptTurns(ws, new Set(Array.isArray(owned) ? owned.map(String) : []));
       return;
     }
 
@@ -364,16 +493,12 @@ export function attachWorker(ws: WebSocket): void {
   });
 
   const detach = () => {
+    clearTimeout(helloTimer);
+    clearInterval(watchdog);
     if (workerSocket !== ws) return;
     console.log('[ws] worker disconnected');
     workerSocket = null;
-    for (const [turnId, turn] of turns) {
-      if (!turn.finished) {
-        broadcast(turnId, turn, 'error', {
-          message: 'The worker disconnected while handling your message. Please try again.',
-        });
-      }
-    }
+    orphanTurns();
   };
 
   ws.on('close', detach);
