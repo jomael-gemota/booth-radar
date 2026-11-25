@@ -217,6 +217,8 @@ sudo systemctl restart booth-radar-worker
 
 > If `worker/.env` was changed, a restart is required — systemd does not hot-reload env files.
 
+**Restarting mid-turn is safe.** When the worker disconnects, running chat turns wait for it to come back instead of failing. After a network blip, the worker resumes the turn and sends the output it queued while offline. After a restart or crash, the server sends the request again and the user sees a "starting your request again" line. A turn fails only if the worker stays offline for `WORKER_GRACE_MS` (server env, default **120000** ms), or if the worker loses the same turn more than `MAX_TURN_RESTARTS` times (default **2**). See [the design log entry](design-log/2026-11-25-survive-worker-disconnects.md).
+
 ---
 
 ## Quality Checks
