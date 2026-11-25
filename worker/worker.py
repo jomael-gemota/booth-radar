@@ -20,6 +20,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from typing import Any, Callable
 
 from dotenv import load_dotenv
@@ -53,6 +54,37 @@ _running: set[asyncio.Task[None]] = set()
 
 # Cancel events keyed by turnId — set when the server sends a cancel message
 _cancel_events: dict[str, threading.Event] = {}
+
+
+class _Outbox:
+    """
+    Turn frames waiting for the server. It outlives connections: frames sent while
+    disconnected are delivered after the worker reconnects, and a frame is removed
+    only once it was sent. Only touched from the event loop thread.
+    """
+
+    def __init__(self) -> None:
+        self._frames: deque[dict[str, Any]] = deque()
+        self._ready = asyncio.Event()
+
+    def put(self, frame: dict[str, Any]) -> None:
+        self._frames.append(frame)
+        self._ready.set()
+
+    def turn_ids(self) -> set[str]:
+        return {f["turnId"] for f in self._frames if "turnId" in f}
+
+    async def drain(self, ws) -> None:
+        while True:
+            while self._frames:
+                await ws.send(json.dumps(self._frames[0]))
+                self._frames.popleft()
+            self._ready.clear()
+            await self._ready.wait()
+
+
+# Turns whose handle_chat is still running; reported to the server in `hello`
+_active_turns: set[str] = set()
 
 
 # ── Turn handler ───────────────────────────────────────────────────────────
@@ -102,7 +134,23 @@ class _LatestResults:
 
 
 async def handle_chat(
-    outbox: asyncio.Queue[dict[str, Any]],
+    outbox: _Outbox,
+    turn_id: str,
+    conversation_id: str | None,
+    messages: list[dict[str, str]],
+    results: list[dict[str, str]],
+    job: dict[str, Any] | None,
+) -> None:
+    _active_turns.add(turn_id)
+    try:
+        await _run_chat(outbox, turn_id, conversation_id, messages, results, job)
+    finally:
+        # Queued after the turn's last frame, so `hello` always counts the turn as owned.
+        asyncio.get_running_loop().call_soon(_active_turns.discard, turn_id)
+
+
+async def _run_chat(
+    outbox: _Outbox,
     turn_id: str,
     conversation_id: str | None,
     messages: list[dict[str, str]],
@@ -114,7 +162,7 @@ async def handle_chat(
     def send(type_: str, payload: dict[str, Any]) -> None:
         # Called from the executor thread; hand the frame to the event loop.
         loop.call_soon_threadsafe(
-            outbox.put_nowait, {"turnId": turn_id, "type": type_, "payload": payload}
+            outbox.put, {"turnId": turn_id, "type": type_, "payload": payload}
         )
 
     scrubber = artifacts.PathScrubber(lambda t: send("token", {"text": t}))
@@ -172,17 +220,17 @@ async def handle_chat(
     )
 
 
-async def _sender(ws, outbox: asyncio.Queue[dict[str, Any]]) -> None:
+async def _sender(ws, queue: asyncio.Queue[dict[str, Any]]) -> None:
     while True:
-        msg = await outbox.get()
+        msg = await queue.get()
         await ws.send(json.dumps(msg))
 
 
-def _job_sender(loop: asyncio.AbstractEventLoop, outbox: asyncio.Queue[dict[str, Any]]) -> jobs.Send:
+def _job_sender(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue[dict[str, Any]]) -> jobs.Send:
     # Job threads send frames on the current connection; frames sent while
     # disconnected are dropped, and the server resends job_run on reconnect.
     def send(frame: dict[str, Any]) -> None:
-        loop.call_soon_threadsafe(outbox.put_nowait, frame)
+        loop.call_soon_threadsafe(queue.put_nowait, frame)
     return send
 
 
@@ -198,14 +246,23 @@ def _handle_job_message(msg_type: str, msg: dict[str, Any]) -> None:
 # ── WebSocket loop ─────────────────────────────────────────────────────────
 
 async def run() -> None:
+    outbox = _Outbox()
     while True:
         try:
             log.info("[worker] connecting to %s", SERVER_WS_URL)
-            async with websockets.connect(SERVER_WS_URL, ping_interval=20, ping_timeout=30) as ws:
+            # max_size=None: chat and job_run frames carry the whole results table
+            async with websockets.connect(
+                SERVER_WS_URL, ping_interval=20, ping_timeout=30, max_size=None,
+            ) as ws:
                 log.info("[worker] connected")
-                outbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-                sender = asyncio.create_task(_sender(ws, outbox))
-                jobs.set_sender(_job_sender(asyncio.get_running_loop(), outbox))
+                owned = sorted(_active_turns | outbox.turn_ids())
+                await ws.send(json.dumps({"type": "hello", "turns": owned}))
+                if owned:
+                    log.info("[worker] resuming %d turn(s) after reconnecting", len(owned))
+                job_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+                sender = asyncio.create_task(outbox.drain(ws))
+                job_sender = asyncio.create_task(_sender(ws, job_queue))
+                jobs.set_sender(_job_sender(asyncio.get_running_loop(), job_queue))
 
                 try:
                     async for raw in ws:
@@ -240,6 +297,9 @@ async def run() -> None:
                         if not turn_id or not isinstance(messages, list) or not messages:
                             log.warning("[worker] malformed chat message: %s", msg)
                             continue
+                        if turn_id in _active_turns:
+                            log.warning("[worker] chat turn %s is already running", turn_id)
+                            continue
                         results = msg.get("results") or []
                         conversation_id = msg.get("conversationId")
                         log.info("[worker] received chat turn %s (%d messages)", turn_id, len(messages))
@@ -251,6 +311,7 @@ async def run() -> None:
                 finally:
                     jobs.set_sender(lambda frame: None)
                     sender.cancel()
+                    job_sender.cancel()
 
         except ConnectionClosed as exc:
             log.warning("[worker] connection closed (%s) — reconnecting in %ds", exc, RECONNECT_DELAY)
