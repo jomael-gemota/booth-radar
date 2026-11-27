@@ -148,6 +148,17 @@ Rows from later calls merge into earlier ones when their key columns match (e.g.
 
 When the user asks to see a page, the agent calls `screenshot` with a `url` (loaded in a fresh tab with images and fonts) or a browser `session` (the page it clicked through), optionally `full_page`. The PNG is shown in the chat with a download link. A session page that hasn't been clicked or typed into is reloaded with images; after interactions only its images are re-requested, so fonts and lazy images may be missing. A full-page shot over `MAX_SCREENSHOT_BYTES` (9.5 MB) falls back to the visible part. A page that hasn't finished loading after `SCREENSHOT_LOAD_MS` (12 s) is captured as it is; the agent is told which hosts were still loading and the worker log lists the pending files ([design log](design-log/2026-11-24-screenshot-slow-pages.md)). Test on the VM with `python test_local.py --screenshot https://example.com` (saves both kinds in the current folder). See [the design log entry](design-log/2026-11-24-screenshot-session-images.md).
 
+### Style List Uploads
+
+Users can attach a list of styles to scrape with the paperclip button (or by dropping a file on the input): `.csv` (comma or semicolon), `.tsv`, `.txt` (one style per line; tabs split columns) or `.xlsx` (first sheet). Old `.xls` files are rejected with a prompt to save as `.xlsx` or CSV.
+
+- The browser reads the file into rows (`client/src/lib/styleList.ts`); the server never parses spreadsheets.
+- Limits: 5 MB file, 1,000 rows, 50 columns, 60,000 characters of cell text (checked in the browser and again in `POST /api/chat`).
+- The rows are stored on the user message (`messages[].upload`) and sent to the agent as an `<uploaded_file>` block after the typed text on every turn, so follow-ups can refer to the list. The chat shows a file chip with the row count.
+- The agent follows "Uploaded style lists" in `product-catalog/SKILL.md`: URLs are scraped directly; bare style numbers or names are found through the site's feed or search, and styles that weren't found are listed in the reply.
+
+See [the design log entry](design-log/2026-11-27-style-list-uploads.md).
+
 ### File Downloads
 
 Files created during a turn (CSV, XLSX, JSON, TXT, MD — up to 10 MB, max 5 per turn) appear as download chips below the reply.
