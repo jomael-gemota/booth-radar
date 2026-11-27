@@ -423,6 +423,19 @@
   flex-direction: row-reverse;
 }
 
+/* Uploaded file chip above the user's text */
+.msg-user-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: min(72%, 680px);
+}
+
+.msg-user-stack .msg-bubble {
+  max-width: 100%;
+}
+
 /* ── Avatar ─────────────────────────────────────────────────────────────── */
 
 .msg-avatar {
@@ -1123,9 +1136,79 @@
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-.input-wrapper:focus-within {
+.input-wrapper:focus-within,
+.input-wrapper--drag {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+/* Attach a style list — bottom-left, mirrors the send button */
+.attach-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-end;
+  width: 34px;
+  height: 34px;
+  margin-left: -8px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.attach-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--accent);
+}
+
+.attach-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* Attached style list, above the input and on sent messages */
+.upload-chip {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 10px;
+  max-width: 360px;
+  padding: 8px 10px 8px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.upload-chip--sent {
+  align-self: flex-end;
+  padding-right: 12px;
+}
+
+.upload-chip-remove {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.upload-chip-remove:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.upload-error {
+  margin: 0;
+  color: #e03e3e;
+  font-size: 0.8rem;
 }
 
 .chat-input {
