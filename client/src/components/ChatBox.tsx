@@ -25,6 +25,12 @@ import './ChatBox.css'
 
 // Larger results aren't rendered in the chat; they download as a CSV file
 const MAX_INLINE_ROWS = 20
+// Default style columns only product tables have; their long text never fits the chat
+const PRODUCT_COLUMNS = new Set(['product title', 'style number', 'style name', 'description', 'bullets', 'specs'])
+
+function isProductTable(results: ResultRow[]): boolean {
+  return Object.keys(results[0] ?? {}).some((c) => PRODUCT_COLUMNS.has(c.trim().toLowerCase()))
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -977,7 +983,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
 
                   {results.length > 0 && conversationId && (
                     <div className="results-block">
-                      {results.length <= MAX_INLINE_ROWS ? (
+                      {results.length <= MAX_INLINE_ROWS && !isProductTable(results) ? (
                         <>
                           <p className="results-label">
                             📊 {results.length} row{results.length !== 1 ? 's' : ''} collected
@@ -1427,15 +1433,17 @@ function ResultsFileCard({ results, conversationId, busy }: {
   busy: boolean
 }) {
   const columns = Object.keys(results[0] ?? {})
-  const rows = results.length.toLocaleString()
+  const rows = `${results.length.toLocaleString()} row${results.length !== 1 ? 's' : ''}`
   return (
     <div className="results-file">
       <div className="results-file-icon" aria-hidden>📄</div>
       <div className="results-file-body">
-        <p className="results-file-title">{rows} rows collected</p>
+        <p className="results-file-title">{rows} collected</p>
         <p className="results-file-columns">{columns.map(columnLabel).join(' · ')}</p>
         {busy ? (
           <p className="results-file-note">The CSV file is ready to download when Booth Radar finishes.</p>
+        ) : isProductTable(results) ? (
+          <p className="results-file-note">Product details are too long to show here, so the full table is a CSV file.</p>
         ) : (
           <p className="results-file-note">Too many rows to show here, so the full table is a CSV file.</p>
         )}
