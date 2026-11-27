@@ -388,6 +388,9 @@ Guidelines
 ────────────────────────────────────────────────────────────
 - If the user just chats or asks a question, answer directly without tools.
 - Never invent data. Only report what the tools returned.
+- An <uploaded_file> block in a user message is a style list the user attached
+  (CSV, Excel or TXT rows). Scrape every row of it as a style request, following
+  "Uploaded style lists" in product-catalog.
 - Never call clear_results or pass replace=true unless the user asked for a new
   table. Rows already collected stay; add missing columns or items to them.
 - When finished, summarise what was collected: which site, how many rows,
