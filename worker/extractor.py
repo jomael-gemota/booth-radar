@@ -206,6 +206,9 @@ def chat_stream(
     )
 
     current_event: Optional[str] = None
+    done          = False
+    finish_reason: Optional[str] = None
+    stream_error  = ""
 
     try:
         with urllib.request.urlopen(req, timeout=timeout or REQUEST_TIMEOUT) as resp:
@@ -227,6 +230,7 @@ def chat_stream(
 
                 data = line[5:].strip()
                 if data == "[DONE]":
+                    done = True
                     break
 
                 try:
@@ -268,10 +272,12 @@ def chat_stream(
                     continue
 
                 # ── standard OpenAI streaming chunk ───────────────────────
+                stream_error = _stream_error(parsed) or stream_error
                 choices = parsed.get("choices")
                 if not choices:
                     continue
-                delta = choices[0].get("delta", {})
+                finish_reason = choices[0].get("finish_reason") or finish_reason
+                delta = choices[0].get("delta") or {}
 
                 # Format 1: native reasoning_content (xAI / DeepSeek-R1)
                 reasoning = delta.get("reasoning_content") or ""
@@ -307,13 +313,47 @@ def chat_stream(
         think_filt.flush()
 
     log.debug(
-        "[extractor] stream done — thinking_chunks=%d content_chunks=%d full_text_len=%d",
-        thinking_chunks, content_chunks, len(full_text),
+        "[extractor] stream done — finish_reason=%s thinking_chunks=%d content_chunks=%d full_text_len=%d",
+        finish_reason, thinking_chunks, content_chunks, len(full_text),
     )
+    if not (cancel and cancel.is_set()):
+        _check_stream_end(done, finish_reason, stream_error, len(full_text))
     if thinking_chunks == 0 and on_thinking:
         log.info("[extractor] no thinking events from Hermes for this request")
 
     return full_text
+
+
+def _stream_error(chunk: dict[str, Any]) -> str:
+    """The error message Hermes puts on a failed run's final chunk ("error" or "hermes.error")."""
+    error = chunk.get("error")
+    if isinstance(error, dict):
+        error = error.get("message")
+    if not error and isinstance(chunk.get("hermes"), dict):
+        error = chunk["hermes"].get("error")
+    return str(error or "").strip()
+
+
+def _check_stream_end(done: bool, finish_reason: Optional[str], error: str, text_len: int) -> None:
+    """
+    Raise when the stream did not end with a finished reply: the connection closed
+    before the final chunk (Hermes restarted or was killed mid-turn), or Hermes
+    reported the run as failed or stopped. A "length" finish keeps its partial reply.
+    """
+    if not done and finish_reason is None:
+        log.warning("[extractor] Hermes stream closed without a final chunk after %d chars", text_len)
+        raise RuntimeError(
+            "Hermes closed the connection before the reply finished "
+            "(the Hermes service may have restarted or run out of memory)"
+        )
+    if finish_reason == "error":
+        log.warning("[extractor] Hermes run failed: %s", error or "no error message")
+        raise RuntimeError(f"Hermes run failed: {error or 'no error message'}")
+    if finish_reason == "cancelled":
+        log.warning("[extractor] Hermes stopped the run before it finished: %s", error or "no reason given")
+        raise RuntimeError(f"Hermes stopped the run before it finished{': ' + error if error else ''}")
+    if finish_reason == "length":
+        log.warning("[extractor] Hermes reply cut short (finish_reason=length): %s", error or "no reason given")
 
 
 def _get_extract_client() -> OpenAI:
