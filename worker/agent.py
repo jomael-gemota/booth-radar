@@ -1570,16 +1570,22 @@ def _run_mcp_turn(
         speak_first(NATIVE_TOOL_PREAMBLE)
         safe_emit("thinking", {"text": t})
 
+    running: dict[int, tuple[str, float]] = {}
+
     def run_tool(name: str, args: dict[str, Any]) -> str:
         if cancel and cancel.is_set():
             return "Error: the user cancelled this turn. Stop and do not call more tools."
         args = {k: v for k, v in args.items() if k != "turn"}
         speak_first(_preamble_for(name, args))
+        call = threading.get_ident()
+        running[call] = (name, time.monotonic())
         try:
             return call_tool(name, args, safe_emit)
         except Exception as exc:
             safe_emit("status", {"text": f"⚠️ {name} failed: {exc}"})
             raise
+        finally:
+            running.pop(call, None)
 
     tool_bridge.register(turn_id, run_tool)
     try:
@@ -1593,6 +1599,11 @@ def _run_mcp_turn(
         )
     finally:
         tool_bridge.unregister(turn_id)
+        for name, started in list(running.values()):
+            log.warning(
+                "[agent] turn %s: Hermes ended the reply while %s was still running (%.1fs)",
+                turn_id, name, time.monotonic() - started,
+            )
 
     if cancel and cancel.is_set():
         raise TurnCancelled()
