@@ -113,6 +113,8 @@ With `AGENT_TOOL_MODE=mcp`, Hermes calls Booth Radar's tools (`find_feeds`, `cap
 
 **Skills:** the scraping strategy (which route to try first, field naming, directories, interactive pages, product catalogs) lives in `worker/hermes-skills/booth-radar/*/SKILL.md`. In mcp mode the system prompt keeps a short summary and Hermes loads the matching skill with `skill_view`; in inline mode the worker adds the skill files to the prompt. Hermes can edit skills it finds under `external_dirs`, so if `git status` on the VM shows changes under `worker/hermes-skills/`, review them and keep or revert (`git checkout -- worker/hermes-skills`). See [the design log entry](design-log/2026-11-12-hermes-skills.md).
 
+**Default style fields:** any style or product request always collects Product Title, Style Number, Style Name, Description, Bullets, Specs, Color, Size, Price, Stock, Variant Reviews and URL, plus any other fields the user asks for, one row per color × size. The `product-catalog` skill holds the rule; Shopify shops get a `shopify:variants` feed (one record per variant). See [the design log entry](design-log/2026-11-27-default-style-fields.md).
+
 **After a `git pull` that adds or changes tools**, restart Hermes as well as the worker: Hermes starts `mcp_server.py` itself and keeps it running, so until Hermes restarts it only knows the old tool list.
 
 To roll back, set `AGENT_TOOL_MODE=inline` and restart the worker.

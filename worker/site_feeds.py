@@ -2,6 +2,7 @@
 site_feeds.py  –  Read a site's public data feeds and sitemaps instead of rendering pages.
 
   * find_feeds(url)        – WordPress REST content types and Shopify products.json
+                             (as products, or one record per variant)
   * capture_api(url)       – JSON endpoints the page calls while loading (api:N feeds)
   * read_feed(url, feed)   – every record of one feed, flattened to plain fields
                              (every letter of a letter-filtered feed)
@@ -202,6 +203,39 @@ def _flatten_shopify(product: dict[str, Any], site: str) -> dict[str, Any]:
     return {k: v for k, v in out.items() if v not in ("", None, [], {})}
 
 
+def _shopify_variants(product: dict[str, Any], site: str) -> list[dict[str, Any]]:
+    """
+    One record per variant. Keys are named like the default style columns ("Color" and
+    "Size" are the shop's own option names), so read_feed maps them without the model.
+    """
+    url = f"{site}/products/{product.get('handle')}"
+    options = [o.get("name") for o in sorted(product.get("options") or [], key=lambda o: o.get("position") or 0)]
+    out: list[dict[str, Any]] = []
+    for variant in product.get("variants") or []:
+        if not isinstance(variant, dict):
+            continue
+        available = variant.get("available")
+        record: dict[str, Any] = {
+            "product_title": product.get("title"),
+            "url": url,
+            "variant_url": f"{url}?variant={variant['id']}" if variant.get("id") else None,
+            "variant": variant.get("title") if variant.get("title") != "Default Title" else None,
+            "sku": variant.get("sku"),
+            "price": variant.get("price"),
+            "regular_price": variant.get("compare_at_price"),
+            "stock": None if available is None else "In stock" if available else "Out of stock",
+            "inventory_quantity": variant.get("inventory_quantity"),
+            "vendor": product.get("vendor"),
+            "product_type": product.get("product_type"),
+        }
+        for i, name in enumerate(options[:3]):
+            value = variant.get(f"option{i + 1}")
+            if name and name != "Title" and value:
+                record[name if name not in record else f"option_{name}"] = value
+        out.append({k: v for k, v in record.items() if v not in ("", None, [], {})})
+    return out
+
+
 def _is_number(value: Any) -> bool:
     try:
         float(value)
@@ -312,22 +346,40 @@ def _shopify_feeds(site: str) -> list[Feed]:
         return []
     sample = data["products"][:1]
     keys = list(_flatten_shopify(sample[0], site).keys())[:SAMPLE_KEYS] if sample else []
-    return [Feed("shopify:products", "Products", f"{site}/products.json", sample_keys=keys)]
+    variant_keys = list(dict.fromkeys(k for v in (_shopify_variants(sample[0], site) if sample else []) for k in v))
+    return [
+        Feed("shopify:products", "Products", f"{site}/products.json", sample_keys=keys),
+        Feed(
+            "shopify:variants", "Product variants, one record per size/colour combination",
+            f"{site}/products.json", sample_keys=variant_keys[:SAMPLE_KEYS],
+        ),
+    ]
 
 
 def _read_shopify(feed: Feed, limit: int) -> list[dict[str, Any]]:
     site = origin(feed.endpoint)
+    if feed.id == "shopify:variants":
+        variants: list[dict[str, Any]] = []
+        for product in _shopify_products(feed.endpoint, limit):
+            variants += _shopify_variants(product, site)
+            if len(variants) >= limit:
+                break
+        return variants[:limit]
+    return [_flatten_shopify(p, site) for p in _shopify_products(feed.endpoint, limit)]
+
+
+def _shopify_products(endpoint: str, limit: int) -> list[dict[str, Any]]:
     products: list[dict[str, Any]] = []
     page = 1
     while len(products) < limit:
-        resp = _get(feed.endpoint, limit=250, page=page)
+        resp = _get(endpoint, limit=250, page=page)
         resp.raise_for_status()
         batch = (_json(resp) or {}).get("products") or []
         products += [p for p in batch if isinstance(p, dict)]
         if len(batch) < 250:
             break
         page += 1
-    return [_flatten_shopify(p, site) for p in products[:limit]]
+    return products[:limit]
 
 
 # ── Captured JSON APIs ─────────────────────────────────────────────────────

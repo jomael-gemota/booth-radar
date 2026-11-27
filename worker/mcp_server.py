@@ -149,7 +149,9 @@ async def extract(
     table. Rows matching existing ones on `key_fields` fill in their empty cells.
     Pass `session` instead of `urls` to extract from a browser session's current page,
     or `url_template` (e.g. "https://site/item/{Item ID}") to build item pages from a
-    results column; each page fills the rows sharing its value.
+    results column; each page fills the rows sharing its value. `url_template="{URL}"`
+    reads each distinct page in the "URL" column once and fills all its rows (style
+    details on every variant row).
     """
     return await _call(
         "extract", turn, urls=urls or [], fields=fields, instructions=instructions,
@@ -176,8 +178,8 @@ async def start_job(
     table as it goes; returns at once. Give exactly one URL source: `urls`,
     `url_column` (a results column holding page URLs, to fill in details from each
     page), `sitemap` (a site URL) with `include`, or `url_template` (e.g.
-    "https://site/item/{Item ID}", pages built from a results column; each fills the
-    rows sharing its value). Use it instead of extract for large page counts.
+    "https://site/item/{Item ID}", or "{URL}" for a column of page URLs; each page fills
+    the rows sharing its value). Use it instead of extract for large page counts.
     """
     return await _call(
         "start_job", turn, fields=fields, urls=urls or [], url_column=url_column, sitemap=sitemap,

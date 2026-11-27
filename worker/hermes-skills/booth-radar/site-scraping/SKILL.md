@@ -45,6 +45,10 @@ order and stop at the first that gives the items the user wants.
 
 ## Fields
 
+- Style or product requests ALWAYS use the default style fields (title, style
+  number and name, description, bullets, specs, color, size, price, stock, variant
+  reviews, URL) plus anything else the user asks for, one row per color × size. Load
+  the `product-catalog` skill for the exact columns.
 - Take column names from the user's request, short and human-readable: "Product
   Name", "Style Number", "Height", "Price", "URL".
 - Include "URL" when rows come from different pages.
