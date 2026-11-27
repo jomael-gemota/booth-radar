@@ -197,7 +197,8 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
         "call it again for more. Pass `session` instead of urls to extract from a\n"
         "browser session's current page (after clicking, filtering or scrolling), or\n"
         "`url_template` (e.g. \"https://site/item/{Item ID}\") to build item pages from a\n"
-        "results column; each page fills the rows sharing its value.",
+        "results column; each page fills the rows sharing its value. `url_template=\"{URL}\"`\n"
+        "reads each distinct page of the \"URL\" column once and fills all its rows.",
     ),
     (
         "navigate",
@@ -261,8 +262,8 @@ _TOOL_DOCS: list[tuple[str, str, str, str]] = [
         "table as it goes; returns at once. Give exactly one URL source: `urls`;\n"
         "`url_column` (a results column holding page URLs, e.g. \"URL\" from a feed, to\n"
         "fill in details from each page); `sitemap` (a site URL) with `include`\n"
-        "(like map_site); or `url_template` (e.g. \"https://site/item/{Item ID}\", pages\n"
-        "built from a results column; each fills the rows sharing its value).\n"
+        "(like map_site); or `url_template` (e.g. \"https://site/item/{Item ID}\", or\n"
+        "\"{URL}\" for a column of page URLs; each page fills the rows sharing its value).\n"
         f"Up to {jobs.MAX_JOB_URLS:,} pages. Use it instead of extract when more\n"
         f"than {jobs.JOB_MIN_URLS} pages need extracting. One job per conversation.",
     ),
@@ -641,11 +642,16 @@ def _column(table: ResultsTable, name: str) -> str:
 
 
 def _template_parts(template: str) -> tuple[str, str, str] | None:
-    """(before, column name, after) of a URL template with one {Column} placeholder."""
+    """
+    (before, column name, after) of a URL template with one {Column} placeholder. A bare
+    "{URL}" template uses the column's page URLs as they are (before and after are "").
+    """
     names = _PLACEHOLDER_RE.findall(template)
-    if len(names) != 1 or not template.startswith(("http://", "https://")):
+    if len(names) != 1:
         return None
     before, after = template.split("{" + names[0] + "}")
+    if (before or after) and not template.startswith(("http://", "https://")):
+        return None
     return before, names[0].strip(), after
 
 
@@ -656,12 +662,20 @@ def _template_urls(table: ResultsTable, template: str) -> tuple[str, dict[str, s
     """
     parts = _template_parts(template)
     if parts is None:
-        return "Error: 'url_template' must be a page URL with one {Column} placeholder, e.g. https://site/item/{ID}."
+        return (
+            "Error: 'url_template' must be a page URL with one {Column} placeholder, e.g. "
+            "https://site/item/{ID}, or just {URL} for a column of page URLs."
+        )
     before, name, after = parts
     column = _column(table, name)
     if not column:
         return f"Error: the results table has no column {name!r}; columns are {table.columns}."
     values = list(dict.fromkeys(row[column] for row in table.snapshot() if row[column]))
+    if not before and not after:
+        values = [v for v in values if v.startswith(("http://", "https://"))]
+        if not values:
+            return f"Error: the {column!r} column holds no page URLs."
+        return column, {v: v for v in values}
     if not values:
         return f"Error: the {column!r} column is empty, so there are no pages to build."
     return column, {f"{before}{quote(v, safe='')}{after}": v for v in values}
@@ -672,6 +686,8 @@ def _template_value(template: str, url: str) -> str:
     parts = _template_parts(template)
     if parts is None or not url.startswith(parts[0]) or not url.endswith(parts[2]):
         return ""
+    if not parts[0] and not parts[2]:
+        return url
     return unquote(url[len(parts[0]):len(url) - len(parts[2])])
 
 
