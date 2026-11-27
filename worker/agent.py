@@ -359,6 +359,13 @@ How to scrape fast
 6. fetch_page only to understand a layout or answer a question.
 7. The user asks to see or screenshot a page: call screenshot.
 
+Style or product requests ALWAYS collect the default style fields even when the user
+doesn't name them: Product Title, Style Number, Style Name, Description, Bullets,
+Specs, Color, Size, Price, Stock, Variant Reviews, URL — then any other fields the
+user asks for. One row per color × size, key_fields ["URL", "Color", "Size"]; then
+Description, Bullets and Specs with url_template="{{URL}}". Load product-catalog for
+the details.
+
 Before working on a website, load the matching skill with skill_view —
 always site-scraping, plus any other that fits:
 {_skill_list()}
