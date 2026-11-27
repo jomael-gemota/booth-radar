@@ -85,6 +85,25 @@ page's JSON-LD with `fetch_page`, or use `navigate` and the interaction tools.
    `start_job(urls=[...], fields=[...pass 1 columns...], key_fields=["URL", "Color",
    "Size"])` and pass 2 in a later turn, once the job is done.
 
+## Uploaded style lists
+
+A user message can end with an `<uploaded_file name="…" rows="…">` block: the rows of a
+CSV, Excel or TXT file the user attached, one row per line, cells joined with " | ".
+
+- The first line may be a header ("Style Number | Color") or already a style (lists
+  of bare style numbers often have no header); decide from the values.
+- Work through EVERY row, not a sample. Tell the user how many styles the file has.
+- Rows with product page URLs: run both passes on those URLs (`start_job` with
+  `urls` for more than 100 pages).
+- Style numbers or names only: if the user didn't say which site, ask once. Then
+  read the site's feed (`find_feeds`, `read_feed`) with `instructions` like "Only
+  styles whose style number is one of: …", or find each style's page through the
+  site's search (`navigate` + `fill`, or a search URL with `fetch_page`), and run both
+  passes on the pages found.
+- Keep the file's column names for the matching columns ("Item #" instead of "Style
+  Number"), and carry over other columns the user wants kept (e.g. their own notes).
+- In the summary, list the styles from the file that weren't found on the site.
+
 ## Columns
 
 - Keep the names the user used ("Style Number", not "SKU", if they said style number).

@@ -9,8 +9,10 @@ import {
   isWorkerConnected,
   startTurn,
   subscribe,
+  type ChatMessage,
   type ConversationDoc,
   type ResultRow,
+  type Upload,
 } from '../relay.js';
 import { contextFor, latestJob } from '../jobs.js';
 import { requireAuth } from '../middleware/requireAuth.js';
@@ -23,9 +25,47 @@ chatRouter.use(requireAuth);
 const MAX_MESSAGE_CHARS = 8000;
 // Number of most recent messages sent to the worker as context
 const HISTORY_WINDOW = 30;
+// Uploaded style lists are sent to the agent in full on every turn
+const MAX_UPLOAD_ROWS = 1000;
+const MAX_UPLOAD_COLUMNS = 50;
+const MAX_UPLOAD_CHARS = 60_000;
 
 function parseId(raw: string): ObjectId | null {
   return /^[a-f0-9]{24}$/i.test(raw) ? new ObjectId(raw) : null;
+}
+
+/** Validate an uploaded style list: the parsed upload, or an error message. */
+function parseUpload(raw: unknown): Upload | string {
+  const { name, rows } = (raw ?? {}) as { name?: unknown; rows?: unknown };
+  if (typeof name !== 'string' || !name.trim() || !Array.isArray(rows)) {
+    return 'upload must have a file name and rows';
+  }
+  if (!rows.length) return 'The file has no rows.';
+  if (rows.length > MAX_UPLOAD_ROWS) {
+    return `The file has ${rows.length.toLocaleString()} rows; the limit is ${MAX_UPLOAD_ROWS.toLocaleString()}. Split it into smaller files.`;
+  }
+  let chars = 0;
+  const parsed: string[][] = [];
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length > MAX_UPLOAD_COLUMNS) {
+      return `Each row can have at most ${MAX_UPLOAD_COLUMNS} columns.`;
+    }
+    const cells = row.map((c) => (c == null ? '' : String(c).replace(/\s+/g, ' ').trim()));
+    chars += cells.reduce((n, c) => n + c.length, 0);
+    parsed.push(cells);
+  }
+  if (chars > MAX_UPLOAD_CHARS) {
+    return `The file has too much text (${chars.toLocaleString()} characters; the limit is ${MAX_UPLOAD_CHARS.toLocaleString()}). Remove unneeded columns or split it.`;
+  }
+  return { name: name.trim().slice(0, 200), rows: parsed };
+}
+
+/** A message as the worker sees it: an uploaded list follows the typed text. */
+function workerContent({ content, upload }: Pick<ChatMessage, 'content' | 'upload'>): string {
+  if (!upload) return content;
+  const name = upload.name.replace(/"/g, "'");
+  const rows = upload.rows.map((r) => r.join(' | ')).join('\n');
+  return `${content}\n\n<uploaded_file name="${name}" rows="${upload.rows.length}">\n${rows}\n</uploaded_file>`;
 }
 
 /** Find a conversation by ID scoped to the authenticated user. */
@@ -62,11 +102,15 @@ chatRouter.get('/conversations', async (req: Request, res: Response) => {
 });
 
 // ── POST /api/chat ─────────────────────────────────────────────────────────
-// Body: { conversationId?: string, message: string }
+// Body: { conversationId?: string, message: string, upload?: { name: string, rows: string[][] } }
 // Returns: { conversationId: string, turnId: string }
 chatRouter.post('/chat', async (req: Request, res: Response) => {
   const userId = req.user!.id;
-  const { conversationId, message } = req.body as { conversationId?: string; message?: string };
+  const { conversationId, message, upload: rawUpload } = req.body as {
+    conversationId?: string;
+    message?: string;
+    upload?: unknown;
+  };
 
   const text = typeof message === 'string' ? message.trim() : '';
   if (!text) {
@@ -76,6 +120,16 @@ chatRouter.post('/chat', async (req: Request, res: Response) => {
   if (text.length > MAX_MESSAGE_CHARS) {
     res.status(400).json({ error: `message is too long (max ${MAX_MESSAGE_CHARS} characters)` });
     return;
+  }
+
+  let upload: Upload | undefined;
+  if (rawUpload != null) {
+    const parsed = parseUpload(rawUpload);
+    if (typeof parsed === 'string') {
+      res.status(400).json({ error: parsed });
+      return;
+    }
+    upload = parsed;
   }
 
   if (!isWorkerConnected()) {
@@ -99,7 +153,7 @@ chatRouter.post('/chat', async (req: Request, res: Response) => {
     }
   }
 
-  const userMessage = { role: 'user' as const, content: text, at: now };
+  const userMessage: ChatMessage = { role: 'user', content: text, at: now, ...(upload ? { upload } : {}) };
 
   if (convo) {
     await col.updateOne(
@@ -125,7 +179,7 @@ chatRouter.post('/chat', async (req: Request, res: Response) => {
   const turnId = new ObjectId().toHexString();
   const history = convo.messages
     .slice(-HISTORY_WINDOW)
-    .map(({ role, content }) => ({ role, content }));
+    .map((m) => ({ role: m.role, content: workerContent(m) }));
 
   const job = await latestJob(convo._id);
 
@@ -148,7 +202,13 @@ chatRouter.get('/conversations/:id', async (req: Request, res: Response) => {
   }
   res.json({
     id:          convo._id.toHexString(),
-    messages:    convo.messages.map(({ role, content, attachments, duration }) => ({ role, content, attachments, duration })),
+    messages:    convo.messages.map(({ role, content, attachments, duration, upload }) => ({
+      role,
+      content,
+      attachments,
+      duration,
+      upload: upload ? { name: upload.name, rowCount: upload.rows.length } : undefined,
+    })),
     results:     convo.results,
     activeTurnId: activeTurnFor(req.params.id) ?? null,
   });

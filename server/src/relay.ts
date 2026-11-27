@@ -19,11 +19,18 @@ export interface Attachment {
   mime?: string;
 }
 
+/** A style list the user attached to a message, parsed into rows by the browser. */
+export interface Upload {
+  name: string;
+  rows: string[][];
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'thinking';
   content: string;
   at: Date;
   attachments?: Attachment[];
+  upload?: Upload;
   /** Milliseconds from worker dispatch to turn completion (assistant messages only). */
   duration?: number;
 }

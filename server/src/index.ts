@@ -69,6 +69,8 @@ async function main() {
   app.use(passport.initialize());
   app.use(passport.session());
 
+  // Chat messages can carry an uploaded style list
+  app.use('/api/chat', express.json({ limit: '2mb' }));
   app.use(express.json());
 
   app.use('/api', authRouter);

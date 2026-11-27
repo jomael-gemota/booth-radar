@@ -20,14 +20,27 @@ import AccountPage from './AccountPage'
 import UserLogsPage from './UserLogsPage'
 import ExportButton from './ExportButton'
 import JobChip from './JobChip'
+import { readStyleList, STYLE_LIST_ACCEPT, type StyleList } from '../lib/styleList'
 import './ChatBox.css'
 
 // Larger results aren't rendered in the chat; they download as a CSV file
 const MAX_INLINE_ROWS = 20
+// Default style columns only product tables have; their long text never fits the chat
+const PRODUCT_COLUMNS = new Set(['product title', 'style number', 'style name', 'description', 'bullets', 'specs'])
+
+function isProductTable(results: ResultRow[]): boolean {
+  return Object.keys(results[0] ?? {}).some((c) => PRODUCT_COLUMNS.has(c.trim().toLowerCase()))
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 type Role = 'user' | 'assistant' | 'status' | 'system' | 'thinking'
+
+/** A style list sent with a user message (the rows stay on the server). */
+interface UploadInfo {
+  name: string
+  rowCount: number
+}
 
 interface Message {
   id: string
@@ -35,6 +48,7 @@ interface Message {
   text: string
   streaming?: boolean
   attachments?: Attachment[]
+  upload?: UploadInfo
   duration?: number   // ms elapsed from send → turn complete
 }
 
@@ -48,7 +62,13 @@ interface ConversationSummary {
 
 interface ConversationResponse {
   id: string
-  messages: { role: 'user' | 'assistant' | 'thinking'; content: string; attachments?: Attachment[]; duration?: number }[]
+  messages: {
+    role: 'user' | 'assistant' | 'thinking'
+    content: string
+    attachments?: Attachment[]
+    upload?: UploadInfo
+    duration?: number
+  }[]
   results: ResultRow[]
   activeTurnId: string | null
 }
@@ -136,6 +156,9 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   // Active conversation
   const [messages,        setMessages]        = useState<Message[]>([WELCOME])
   const [input,           setInput]           = useState('')
+  const [upload,          setUpload]          = useState<StyleList | null>(null)
+  const [uploadError,     setUploadError]     = useState<string | null>(null)
+  const [dragOver,        setDragOver]        = useState(false)
   const [conversationId,  setConversationId]  = useState<string | null>(null)
   const [turnId,   setTurnId]   = useState<string | null>(null)
   const [results,  setResults]  = useState<ResultRow[]>([])
@@ -153,6 +176,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   // Whether the activity bubble's last line is a progress line the next one replaces
   const lastLineProgress = useRef(false)
   const inputRef       = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef   = useRef<HTMLInputElement>(null)
   const turnStartRef   = useRef<number | null>(null)
 
   // ── Auto-resize textarea ───────────────────────────────────────────────
@@ -275,6 +299,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
           role:        m.role as Role,
           text:        m.content,
           attachments: m.attachments,
+          upload:      m.upload,
           duration:    m.duration,
         })),
       ])
@@ -472,21 +497,50 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     else addMessage({ id: genId(), role: 'assistant', text })
   }
 
+  // ── Style list upload ──────────────────────────────────────────────────
+
+  async function attachFile(file: File | undefined) {
+    if (!file) return
+    setUploadError(null)
+    try {
+      setUpload(await readStyleList(file))
+    } catch (err) {
+      setUpload(null)
+      setUploadError((err as Error).message)
+    }
+    inputRef.current?.focus()
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault()
+    setDragOver(false)
+    void attachFile(e.dataTransfer.files[0])
+  }
+
   // ── Send message ───────────────────────────────────────────────────────
 
   async function send() {
-    const text = input.trim()
-    if (!text || busy) return
+    const typed = input.trim()
+    if ((!typed && !upload) || busy) return
+    const text = typed || 'Scrape the styles in the attached file.'
+    const sentUpload = upload
 
-    addMessage({ id: genId(), role: 'user', text })
+    addMessage({
+      id: genId(),
+      role: 'user',
+      text,
+      upload: sentUpload ? { name: sentUpload.name, rowCount: sentUpload.rows.length } : undefined,
+    })
     setInput('')
+    setUpload(null)
+    setUploadError(null)
     setBusy(true)
 
     try {
       const res = await fetch('/api/chat', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ conversationId, message: text }),
+        body:    JSON.stringify({ conversationId, message: text, upload: sentUpload ?? undefined }),
       })
       const body = (await res.json().catch(() => ({}))) as {
         error?: string
@@ -518,6 +572,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
       }
     } catch (err) {
       setBusy(false)
+      setUpload(sentUpload)
       addMessage({ id: genId(), role: 'system', text: `❌ ${(err as Error).message}` })
     }
   }
@@ -543,6 +598,8 @@ export default function ChatBox({ user }: { user: AuthUser }) {
     setResults([])
     setMessages([WELCOME])
     setInput('')
+    setUpload(null)
+    setUploadError(null)
     setView('chat')
     inputRef.current?.focus()
   }
@@ -617,7 +674,53 @@ export default function ChatBox({ user }: { user: AuthUser }) {
   function renderInputForm() {
     return (
       <form className="input-form" onSubmit={handleSubmit}>
-        <div className="input-wrapper">
+        {upload && (
+          <div className="upload-chip">
+            <span className="attachment-chip-ext">{fileExtension(upload.name)}</span>
+            <span className="attachment-chip-meta">
+              <span className="attachment-chip-name">{upload.name}</span>
+              <span className="attachment-chip-size">
+                {upload.rows.length.toLocaleString()} row{upload.rows.length !== 1 ? 's' : ''}
+              </span>
+            </span>
+            <button
+              type="button"
+              className="upload-chip-remove"
+              onClick={() => setUpload(null)}
+              title="Remove file"
+              aria-label="Remove file"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        {uploadError && <p className="upload-error">❌ {uploadError}</p>}
+        <div
+          className={`input-wrapper${dragOver ? ' input-wrapper--drag' : ''}`}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={STYLE_LIST_ACCEPT}
+            hidden
+            onChange={(e) => {
+              void attachFile(e.target.files?.[0])
+              e.target.value = ''
+            }}
+          />
+          <button
+            className="attach-btn"
+            type="button"
+            disabled={busy}
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach a style list (CSV, Excel or TXT)"
+            aria-label="Attach a style list"
+          >
+            <PaperclipIcon />
+          </button>
           <textarea
             ref={inputRef}
             className="chat-input"
@@ -643,7 +746,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
             <button
               className="send-btn"
               type="submit"
-              disabled={!input.trim()}
+              disabled={!input.trim() && !upload}
               title="Send message"
               aria-label="Send message"
             >
@@ -880,7 +983,7 @@ export default function ChatBox({ user }: { user: AuthUser }) {
 
                   {results.length > 0 && conversationId && (
                     <div className="results-block">
-                      {results.length <= MAX_INLINE_ROWS ? (
+                      {results.length <= MAX_INLINE_ROWS && !isProductTable(results) ? (
                         <>
                           <p className="results-label">
                             📊 {results.length} row{results.length !== 1 ? 's' : ''} collected
@@ -1126,8 +1229,21 @@ function MessageBubble({ msg, conversationId, hasResults }: MessageBubbleProps) 
   if (msg.role === 'user') {
     return (
       <div className="msg-row msg-row--user">
-        <div className="msg-bubble msg-bubble--user">
-          <MessageContent text={msg.text} />
+        <div className="msg-user-stack">
+          {msg.upload && (
+            <div className="upload-chip upload-chip--sent">
+              <span className="attachment-chip-ext">{fileExtension(msg.upload.name)}</span>
+              <span className="attachment-chip-meta">
+                <span className="attachment-chip-name">{msg.upload.name}</span>
+                <span className="attachment-chip-size">
+                  {msg.upload.rowCount.toLocaleString()} row{msg.upload.rowCount !== 1 ? 's' : ''}
+                </span>
+              </span>
+            </div>
+          )}
+          <div className="msg-bubble msg-bubble--user">
+            <MessageContent text={msg.text} />
+          </div>
         </div>
       </div>
     )
@@ -1317,15 +1433,17 @@ function ResultsFileCard({ results, conversationId, busy }: {
   busy: boolean
 }) {
   const columns = Object.keys(results[0] ?? {})
-  const rows = results.length.toLocaleString()
+  const rows = `${results.length.toLocaleString()} row${results.length !== 1 ? 's' : ''}`
   return (
     <div className="results-file">
       <div className="results-file-icon" aria-hidden>📄</div>
       <div className="results-file-body">
-        <p className="results-file-title">{rows} rows collected</p>
+        <p className="results-file-title">{rows} collected</p>
         <p className="results-file-columns">{columns.map(columnLabel).join(' · ')}</p>
         {busy ? (
           <p className="results-file-note">The CSV file is ready to download when Booth Radar finishes.</p>
+        ) : isProductTable(results) ? (
+          <p className="results-file-note">Product details are too long to show here, so the full table is a CSV file.</p>
         ) : (
           <p className="results-file-note">Too many rows to show here, so the full table is a CSV file.</p>
         )}
@@ -1409,6 +1527,11 @@ function formatBytes(n: number) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`
 }
 
+function fileExtension(name: string) {
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? name.slice(dot + 1).toUpperCase() : 'FILE'
+}
+
 function AttachmentChip({ file }: { file: Attachment }) {
   if (file.mime?.startsWith('image/')) {
     return (
@@ -1432,8 +1555,7 @@ function AttachmentChip({ file }: { file: Attachment }) {
     )
   }
 
-  const dot = file.name.lastIndexOf('.')
-  const ext = dot > 0 ? file.name.slice(dot + 1).toUpperCase() : 'FILE'
+  const ext = fileExtension(file.name)
   return (
     <a
       className="attachment-chip"
@@ -1496,6 +1618,15 @@ function SendIcon() {
       strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <line x1="22" y1="2" x2="11" y2="13" />
       <polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </svg>
+  )
+}
+
+function PaperclipIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
     </svg>
   )
 }
