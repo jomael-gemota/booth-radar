@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
@@ -78,20 +79,32 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply(409, "Error: no Booth Radar turn matches this call. Pass the turn id from your instructions.")
             return
         log.info("[bridge] tool=%s args=%s", name, args)
+        started = time.monotonic()
         try:
             text = runner(name, args)
         except Exception as exc:
             log.warning("[bridge] tool %s failed: %s", name, exc)
             text = f"Error: {name} failed: {exc}"
-        self._reply(200, text)
+        if not self._reply(200, text):
+            log.warning(
+                "[bridge] tool %s finished after %.1fs but its caller had disconnected "
+                "(Hermes' MCP server process exited, or Hermes stopped waiting)",
+                name, time.monotonic() - started,
+            )
 
-    def _reply(self, status: int, text: str) -> None:
+    def _reply(self, status: int, text: str) -> bool:
+        """Send the response; False when the caller has already closed the connection."""
         data = json.dumps({"text": text}).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except ConnectionError:
+            self.close_connection = True
+            return False
+        return True
 
     def log_message(self, format: str, *args: Any) -> None:
         log.debug("[bridge] " + format, *args)
